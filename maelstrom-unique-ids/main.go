@@ -3,8 +3,8 @@ package main
 import (
 	"encoding/json"
 	"log"
+	"strconv"
 
-	"github.com/google/uuid"
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
 
@@ -12,6 +12,7 @@ import (
 
 func main() {
 	n := maelstrom.NewNode()
+	count := 0
 	n.Handle("generate", func(msg maelstrom.Message) error {
 		// Unmarshal the message body as a loosely-typed map.
 		var body map[string]any
@@ -20,10 +21,12 @@ func main() {
 		}
 
 		// Send message back with UUID.
-		return n.Reply(msg, map[string]any{
+		newBody := map[string]any{
 			"type": "generate_ok",
-			"id":   uuid.New().ID(),
-		})
+			"id":   n.ID() + "_" + strconv.Itoa(count),
+		}
+		count += 1
+		return n.Reply(msg, newBody)
 	})
 	if err := n.Run(); err != nil {
 		log.Fatal(err)
