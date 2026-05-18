@@ -33,4 +33,4 @@ go.work.sum
 
 # Maelstrom
 maelstrom/
-maelstrom-echo/store/
+*/store/
