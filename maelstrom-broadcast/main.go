@@ -11,6 +11,7 @@ import (
 
 func main() {
 	n := maelstrom.NewNode()
+	var messages []any
 
 	// Requests node broadcast message
 	n.Handle("broadcast", func(msg maelstrom.Message) error {
@@ -20,8 +21,8 @@ func main() {
 			return err
 		}
 
-		// TODO: update below
-		return n.Reply(msg, body)
+		messages = append(messages, body["message"])
+		return n.Reply(msg, map[string]any{"type": "broadcast_ok"})
 	})
 
 	// Asks node to return seen messages
@@ -32,8 +33,7 @@ func main() {
 			return err
 		}
 
-		// TODO: update below
-		return n.Reply(msg, body)
+		return n.Reply(msg, map[string]any{"type": "read_ok", "messages": messages})
 	})
 
 	// Informs nodes of neighbors
@@ -44,8 +44,7 @@ func main() {
 			return err
 		}
 
-		// TODO: update below
-		return n.Reply(msg, body)
+		return n.Reply(msg, map[string]any{"type": "topology_ok"})
 	})
 
 	if err := n.Run(); err != nil {
