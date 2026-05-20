@@ -12,7 +12,7 @@ import (
 
 func main() {
 	n := maelstrom.NewNode()
-	count := 0
+	count := uint64(0)
 	n.Handle("generate", func(msg maelstrom.Message) error {
 		// Unmarshal the message body as a loosely-typed map.
 		var body map[string]any
@@ -23,7 +23,7 @@ func main() {
 		// Send message back with UUID.
 		newBody := map[string]any{
 			"type": "generate_ok",
-			"id":   n.ID() + "_" + strconv.Itoa(count),
+			"id":   n.ID() + "-" + strconv.FormatUint(count, 10),
 		}
 		count += 1
 		return n.Reply(msg, newBody)
