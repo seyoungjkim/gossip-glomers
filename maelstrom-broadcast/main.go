@@ -47,21 +47,19 @@ func main() {
 		}
 		message := body.Message
 
+		// Lock: update message state
 		mu.Lock()
-		// Don't do anything if seen already
-		if _, ok := seenMessages[message]; ok {
+		if _, ok := seenMessages[message]; ok { // Don't do anything if seen already
 			mu.Unlock()
-			// Only respond to clients
-			if msg.Src[0] != 'c' {
+			if msg.Src[0] != 'c' { // Only respond to clients
 				return nil
 			}
 			return n.Reply(msg, map[string]any{"type": "broadcast_ok"})
 		}
 
-		// Otherwise add to seen messages
+		// Add to seen messages and add new message to pending messages queue
 		seenMessages[message] = struct{}{}
-
-		// Add new message to pending messages queue
+		var toSendRPC []string
 		for _, neighbor := range topology[n.ID()] {
 			if neighbor == msg.Src {
 				continue
@@ -70,14 +68,23 @@ func main() {
 				pendingMessages[neighbor] = make(map[int64]struct{})
 			}
 			pendingMessages[neighbor][message] = struct{}{}
-			n.RPC(neighbor, map[string]any{"type": "broadcast", "message": body.Message}, func(msg maelstrom.Message) error {
+			toSendRPC = append(toSendRPC, neighbor)
+		}
+		mu.Unlock()
+
+		// Unlocked: Now send all the messages
+		for _, neighbor := range toSendRPC {
+			n.RPC(neighbor, map[string]any{"type": "broadcast", "message": message}, func(msg maelstrom.Message) error {
 				mu.Lock()
 				delete(pendingMessages[neighbor], message)
+				if len(pendingMessages[neighbor]) == 0 {
+					delete(pendingMessages, neighbor)
+				}
 				mu.Unlock()
 				return nil
 			})
 		}
-		mu.Unlock()
+
 		// Only respond to clients
 		if msg.Src[0] != 'c' {
 			return nil
@@ -147,22 +154,30 @@ func main() {
 	go func() {
 		ticker := time.NewTicker(retryBackoff)
 		for range ticker.C {
+			// Lock: Gather messages to send
 			mu.Lock()
+			toSendRPC := make(map[string][]int64)
 			for neighbor, messages := range pendingMessages {
-				var messagesToSend []int64
 				for m := range messages {
-					messagesToSend = append(messagesToSend, m)
+					toSendRPC[neighbor] = append(toSendRPC[neighbor], m)
 				}
-				n.RPC(neighbor, map[string]any{"type": "bulk_broadcast", "messages": messagesToSend}, func(msg maelstrom.Message) error {
+			}
+			mu.Unlock()
+
+			// Unlocked: Now send them
+			for neighbor, messages := range toSendRPC {
+				n.RPC(neighbor, map[string]any{"type": "bulk_broadcast", "messages": messages}, func(msg maelstrom.Message) error {
 					mu.Lock()
-					for _, m := range messagesToSend {
-						delete(messages, m)
+					for _, sentMessage := range messages {
+						delete(pendingMessages[neighbor], sentMessage)
+					}
+					if len(pendingMessages[neighbor]) == 0 {
+						delete(pendingMessages, neighbor)
 					}
 					mu.Unlock()
 					return nil
 				})
 			}
-			mu.Unlock()
 		}
 	}()
 
