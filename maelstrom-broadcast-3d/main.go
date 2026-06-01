@@ -12,8 +12,6 @@ import (
 
 // Run 3d (efficiency): ./../maelstrom/maelstrom test -w broadcast --bin ~/go/bin/maelstrom-broadcast-3d --node-count 25 --time-limit 20 --rate 100 --latency 100
 //   Goal: Messages-per-operation < 30, Median latency < 400ms, Maximum latency < 600ms
-// Run 3e (high efficiency): ./../maelstrom/maelstrom test -w broadcast --bin ~/go/bin/maelstrom-broadcast-3d --node-count 25 --time-limit 20 --rate 100 --latency 100
-//   Goal: Messages-per-operation < 20, Median latency < 1 second, Maximum latency < 2 seconds
 // With partitions: --nemesis partition
 
 const retryBackoff = 100 * time.Millisecond
@@ -110,6 +108,7 @@ func main() {
 		if err := json.Unmarshal(msg.Body, &body); err != nil {
 			return err
 		}
+		// Ignore given topology; select a single leader and followers
 		var nodes []string
 		for node := range body.Topology {
 			nodes = append(nodes, node)
@@ -122,6 +121,7 @@ func main() {
 			leaderTopology[leader] = append(leaderTopology[leader], follower)
 			leaderTopology[follower] = []string{leader}
 		}
+		// Set the new topology
 		mu.Lock()
 		topology = leaderTopology
 		mu.Unlock()
