@@ -28,7 +28,7 @@ type listCommittedOffsetsMessage struct {
 
 func main() {
 	n := maelstrom.NewNode()
-	messages := make(map[string][]int)
+	logs := make(map[string][]int)
 	clientOffsets := make(map[string]map[string]int)
 
 	n.Handle("send", func(msg maelstrom.Message) error {
@@ -37,11 +37,11 @@ func main() {
 		if err := json.Unmarshal(msg.Body, &body); err != nil {
 			return err
 		}
-		if _, ok := messages[body.Key]; !ok {
-			messages[body.Key] = make([]int, 0)
+		if _, ok := logs[body.Key]; !ok {
+			logs[body.Key] = make([]int, 0)
 		}
-		offset := len(messages[body.Key])
-		messages[body.Key] = append(messages[body.Key], body.Msg)
+		offset := len(logs[body.Key])
+		logs[body.Key] = append(logs[body.Key], body.Msg)
 		return n.Reply(msg, map[string]any{"type": "send_ok", "offset": offset})
 	})
 
@@ -53,13 +53,13 @@ func main() {
 		}
 		msgs := make(map[string][][]int)
 		for requestedKey, requestedOffset := range body.Offsets {
-			logs, ok := messages[requestedKey]
-			if !ok || len(logs) <= requestedOffset {
+			requestedLogs, ok := logs[requestedKey]
+			if !ok || len(requestedLogs) <= requestedOffset {
 				continue
 			}
 			msgs[requestedKey] = make([][]int, 0)
-			// TODO: return more than 1
-			msgs[requestedKey] = append(msgs[requestedKey], []int{requestedOffset, logs[requestedOffset]})
+			// Return message at offset
+			msgs[requestedKey] = append(msgs[requestedKey], []int{requestedOffset, requestedLogs[requestedOffset]})
 		}
 		return n.Reply(msg, map[string]any{"type": "poll_ok", "msgs": msgs})
 	})
@@ -86,7 +86,7 @@ func main() {
 			return err
 		}
 		var offsets = make(map[string]int)
-		if _, ok := messages[msg.Src]; ok {
+		if _, ok := clientOffsets[msg.Src]; ok {
 			offsets = clientOffsets[msg.Src]
 		}
 		return n.Reply(msg, map[string]any{"type": "list_committed_offsets_ok", "offsets": offsets})
