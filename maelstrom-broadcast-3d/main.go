@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"log"
+	"slices"
 	"sync"
 	"time"
 
@@ -109,8 +110,20 @@ func main() {
 		if err := json.Unmarshal(msg.Body, &body); err != nil {
 			return err
 		}
+		var nodes []string
+		for node := range body.Topology {
+			nodes = append(nodes, node)
+		}
+		slices.Sort(nodes)
+		leader := nodes[0]
+		leaderTopology := make(map[string][]string)
+		leaderTopology[leader] = []string{}
+		for _, follower := range nodes[1:] {
+			leaderTopology[leader] = append(leaderTopology[leader], follower)
+			leaderTopology[follower] = []string{leader}
+		}
 		mu.Lock()
-		topology = body.Topology
+		topology = leaderTopology
 		mu.Unlock()
 		return n.Reply(msg, map[string]any{"type": "topology_ok"})
 	})
