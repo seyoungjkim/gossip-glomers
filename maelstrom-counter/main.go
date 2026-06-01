@@ -13,7 +13,8 @@ import (
 
 // Run: ./../maelstrom/maelstrom test -w g-counter --bin ~/go/bin/maelstrom-counter --node-count 3 --rate 100 --time-limit 20 --nemesis partition
 
-const retryBackoff = 50 * time.Millisecond
+const retryBackoff = 5 * time.Millisecond
+const valueKey = "value"
 
 type addMessage struct {
 	Delta int `json:"delta"`
@@ -48,12 +49,12 @@ func main() {
 		delta := body.Delta
 
 		// Read old value and add the delta
-		value, err := readIfExists("value")
+		value, err := readIfExists(valueKey)
 		if err != nil {
 			return err
 		}
 		newValue := value + delta
-		err = kv.CompareAndSwap(context.Background(), "value", value, newValue, true)
+		err = kv.CompareAndSwap(context.Background(), valueKey, value, newValue, true)
 		if err != nil {
 			rpcErr, ok := errors.AsType[*maelstrom.RPCError](err)
 			// The counter was updated - schedule another attempt
@@ -69,7 +70,7 @@ func main() {
 	})
 
 	n.Handle("read", func(msg maelstrom.Message) error {
-		value, err := readIfExists("value")
+		value, err := readIfExists(valueKey)
 		if err != nil {
 			return err
 		}
@@ -81,19 +82,22 @@ func main() {
 		ticker := time.NewTicker(retryBackoff)
 		for range ticker.C {
 			// Skip if nothing to add
-			if nodeDelta == 0 {
+			mu.Lock()
+			currDelta := nodeDelta
+			mu.Unlock()
+			if currDelta == 0 {
 				continue
 			}
 			// Read old value and add the delta
-			value, err := readIfExists("value")
+			value, err := readIfExists(valueKey)
 			if err != nil {
 				continue
 			}
-			newValue := value + nodeDelta
-			err = kv.CompareAndSwap(context.Background(), "value", value, newValue, true)
+			newValue := value + currDelta
+			err = kv.CompareAndSwap(context.Background(), valueKey, value, newValue, true)
 			if err == nil {
 				mu.Lock()
-				nodeDelta = 0
+				nodeDelta -= currDelta
 				mu.Unlock()
 			}
 		}
