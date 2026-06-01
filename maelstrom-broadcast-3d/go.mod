@@ -1,4 +1,4 @@
-module maelstrom-broadcast
+module maelstrom-broadcast-3d
 
 go 1.26.3
 

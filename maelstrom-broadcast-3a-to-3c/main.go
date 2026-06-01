@@ -9,13 +9,9 @@ import (
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
 
-// Run 3a (single-node): ./../maelstrom/maelstrom test -w broadcast --bin ~/go/bin/maelstrom-broadcast --node-count 1 --time-limit 20 --rate 10
-// Run 3b (multi-node): ./../maelstrom/maelstrom test -w broadcast --bin ~/go/bin/maelstrom-broadcast --node-count 5 --time-limit 20 --rate 10
-// Run 3c (network partitions): ./../maelstrom/maelstrom test -w broadcast --bin ~/go/bin/maelstrom-broadcast --node-count 5 --time-limit 20 --rate 10 --nemesis partition
-// Run 3d (efficiency): ./../maelstrom/maelstrom test -w broadcast --bin ~/go/bin/maelstrom-broadcast --node-count 25 --time-limit 20 --rate 100 --latency 100
-//   Goal: Messages-per-operation < 30, Median latency < 400ms, Maximum latency < 600ms
-// Run 3e (high efficiency): ./../maelstrom/maelstrom test -w broadcast --bin ~/go/bin/maelstrom-broadcast --node-count 25 --time-limit 20 --rate 100 --latency 100
-//   Goal: Messages-per-operation < 20, Median latency < 1 second, Maximum latency < 2 seconds
+// Run 3a (single-node): ./../maelstrom/maelstrom test -w broadcast --bin ~/go/bin/maelstrom-broadcast-3a-to-3c --node-count 1 --time-limit 20 --rate 10
+// Run 3b (multi-node): ./../maelstrom/maelstrom test -w broadcast --bin ~/go/bin/maelstrom-broadcast-3a-to-3c --node-count 5 --time-limit 20 --rate 10
+// Run 3c (network partitions): ./../maelstrom/maelstrom test -w broadcast --bin ~/go/bin/maelstrom-broadcast-3a-to-3c --node-count 5 --time-limit 20 --rate 10 --nemesis partition
 
 const retryBackoff = 100 * time.Millisecond
 
