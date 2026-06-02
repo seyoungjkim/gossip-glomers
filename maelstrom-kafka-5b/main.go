@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"strconv"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
@@ -12,6 +13,7 @@ import (
 // Run: ./../maelstrom/maelstrom test -w kafka --bin ~/go/bin/maelstrom-kafka-5b --node-count 2 --concurrency 2n --time-limit 20 --rate 1000
 
 const logPrefix = "log-"
+const offsetPrefix = "offset-"
 const clientPrefix = "client-"
 
 type sendMessage struct {
@@ -34,20 +36,18 @@ type listCommittedOffsetsMessage struct {
 func main() {
 	n := maelstrom.NewNode()
 	kv := maelstrom.NewLinKV(n)
-	logs := make(map[string][]int)
-	clientOffsets := make(map[string]map[string]int)
 
-	// Helper function to return key value, 0 otherwise
-	readIfExists := func(key string, v any) error {
-		err := kv.ReadInto(context.Background(), key, v)
+	// Helper function to populate key value; returns nil if value doesn't exist
+	readIfExists := func(key string) (*int, error) {
+		value, err := kv.ReadInt(context.Background(), key)
 		if err != nil {
 			rpcErr, ok := errors.AsType[*maelstrom.RPCError](err)
-			// Do nothing if key not set yet
 			if ok && rpcErr.Code == maelstrom.KeyDoesNotExist {
-				err = nil
+				return nil, nil
 			}
+			return nil, err
 		}
-		return err
+		return &value, nil
 	}
 
 	n.Handle("send", func(msg maelstrom.Message) error {
@@ -56,14 +56,22 @@ func main() {
 		if err := json.Unmarshal(msg.Body, &body); err != nil {
 			return err
 		}
-		var messages []int
-		err := readIfExists(logPrefix+body.Key, &messages)
+		offset, err := kv.ReadInt(context.Background(), offsetPrefix+body.Key)
+		if err != nil {
+			rpcErr, ok := errors.AsType[*maelstrom.RPCError](err)
+			// Do nothing if key not set yet, otherwise return error
+			if !(ok && rpcErr.Code == maelstrom.KeyDoesNotExist) {
+				return err
+			}
+		}
+		err = kv.CompareAndSwap(context.Background(), offsetPrefix+body.Key, offset, offset+1, true)
 		if err != nil {
 			return err
 		}
-		offset := len(messages)
-		messages = append(messages, body.Msg)
-		// TODO: how to store the message and offset?
+		err = kv.Write(context.Background(), logPrefix+body.Key+strconv.Itoa(offset), body.Msg)
+		if err != nil {
+			return err
+		}
 		return n.Reply(msg, map[string]any{"type": "send_ok", "offset": offset})
 	})
 
@@ -75,13 +83,17 @@ func main() {
 		}
 		msgs := make(map[string][][]int)
 		for requestedKey, requestedOffset := range body.Offsets {
-			requestedLogs, ok := logs[requestedKey]
-			if !ok || len(requestedLogs) <= requestedOffset {
-				continue
+			kvKey := logPrefix + requestedKey + strconv.Itoa(requestedOffset)
+			requestedLog, err := readIfExists(kvKey)
+			if err != nil {
+				return err
 			}
-			msgs[requestedKey] = make([][]int, 0)
-			// Return message at offset
-			msgs[requestedKey] = append(msgs[requestedKey], []int{requestedOffset, requestedLogs[requestedOffset]})
+			if requestedLog != nil {
+				msgs[requestedKey] = make([][]int, 0)
+				// Return message at offset
+				// TODO: return more messages?
+				msgs[requestedKey] = append(msgs[requestedKey], []int{requestedOffset, *requestedLog})
+			}
 		}
 		return n.Reply(msg, map[string]any{"type": "poll_ok", "msgs": msgs})
 	})
@@ -92,11 +104,11 @@ func main() {
 		if err := json.Unmarshal(msg.Body, &body); err != nil {
 			return err
 		}
-		if _, ok := clientOffsets[msg.Src]; !ok {
-			clientOffsets[msg.Src] = make(map[string]int)
-		}
 		for logKey, logOffset := range body.Offsets {
-			clientOffsets[msg.Src][logKey] = logOffset
+			err := kv.Write(context.Background(), clientPrefix+msg.Src+logKey, logOffset)
+			if err != nil {
+				return err
+			}
 		}
 		return n.Reply(msg, map[string]any{"type": "commit_offsets_ok"})
 	})
@@ -108,8 +120,14 @@ func main() {
 			return err
 		}
 		var offsets = make(map[string]int)
-		if _, ok := clientOffsets[msg.Src]; ok {
-			offsets = clientOffsets[msg.Src]
+		for _, logKey := range body.Keys {
+			committedOffset, err := readIfExists(clientPrefix + msg.Src + logKey)
+			if err != nil {
+				return err
+			}
+			if committedOffset != nil {
+				offsets[logKey] = *committedOffset
+			}
 		}
 		return n.Reply(msg, map[string]any{"type": "list_committed_offsets_ok", "offsets": offsets})
 	})
