@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"strconv"
+	"time"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
@@ -37,6 +38,19 @@ func main() {
 	n := maelstrom.NewNode()
 	kv := maelstrom.NewLinKV(n)
 
+	// Helper function to get offset; returns -1 if value doesn't exist
+	readOffset := func(key string) (int, error) {
+		offset, err := kv.ReadInt(context.Background(), offsetPrefix+key)
+		if err != nil {
+			rpcErr, ok := errors.AsType[*maelstrom.RPCError](err)
+			if ok && rpcErr.Code == maelstrom.KeyDoesNotExist {
+				return -1, nil
+			}
+			return 0, err
+		}
+		return offset, nil
+	}
+
 	// Helper function to populate key value; returns nil if value doesn't exist
 	readIfExists := func(key string) (*int, error) {
 		value, err := kv.ReadInt(context.Background(), key)
@@ -56,23 +70,32 @@ func main() {
 		if err := json.Unmarshal(msg.Body, &body); err != nil {
 			return err
 		}
-		offset, err := kv.ReadInt(context.Background(), offsetPrefix+body.Key)
-		if err != nil {
-			rpcErr, ok := errors.AsType[*maelstrom.RPCError](err)
-			// Do nothing if key not set yet, otherwise return error
-			if !(ok && rpcErr.Code == maelstrom.KeyDoesNotExist) {
+		var messageOffset int
+		// Keep attempting to send until success
+		for {
+			prevOffset, err := readOffset(body.Key)
+			if err != nil {
 				return err
 			}
+			messageOffset = prevOffset + 1
+			err = kv.CompareAndSwap(context.Background(), offsetPrefix+body.Key, prevOffset, messageOffset, true)
+			if err != nil {
+				rpcErr, ok := errors.AsType[*maelstrom.RPCError](err)
+				if ok && rpcErr.Code == maelstrom.PreconditionFailed {
+					time.Sleep(10 * time.Millisecond)
+					continue
+				} else {
+					return err
+				}
+			}
+			// success!
+			break
 		}
-		err = kv.CompareAndSwap(context.Background(), offsetPrefix+body.Key, offset, offset+1, true)
+		err := kv.Write(context.Background(), formatLogKey(body.Key, messageOffset), body.Msg)
 		if err != nil {
 			return err
 		}
-		err = kv.Write(context.Background(), logPrefix+body.Key+strconv.Itoa(offset), body.Msg)
-		if err != nil {
-			return err
-		}
-		return n.Reply(msg, map[string]any{"type": "send_ok", "offset": offset})
+		return n.Reply(msg, map[string]any{"type": "send_ok", "offset": messageOffset})
 	})
 
 	n.Handle("poll", func(msg maelstrom.Message) error {
@@ -83,16 +106,13 @@ func main() {
 		}
 		msgs := make(map[string][][]int)
 		for requestedKey, requestedOffset := range body.Offsets {
-			kvKey := logPrefix + requestedKey + strconv.Itoa(requestedOffset)
-			requestedLog, err := readIfExists(kvKey)
+			requestedLog, err := readIfExists(formatLogKey(requestedKey, requestedOffset))
 			if err != nil {
 				return err
 			}
 			if requestedLog != nil {
-				msgs[requestedKey] = make([][]int, 0)
 				// Return message at offset
-				// TODO: return more messages?
-				msgs[requestedKey] = append(msgs[requestedKey], []int{requestedOffset, *requestedLog})
+				msgs[requestedKey] = [][]int{{requestedOffset, *requestedLog}}
 			}
 		}
 		return n.Reply(msg, map[string]any{"type": "poll_ok", "msgs": msgs})
@@ -105,7 +125,7 @@ func main() {
 			return err
 		}
 		for logKey, logOffset := range body.Offsets {
-			err := kv.Write(context.Background(), clientPrefix+msg.Src+logKey, logOffset)
+			err := kv.Write(context.Background(), formatClientKey(msg.Src, logKey), logOffset)
 			if err != nil {
 				return err
 			}
@@ -121,7 +141,7 @@ func main() {
 		}
 		var offsets = make(map[string]int)
 		for _, logKey := range body.Keys {
-			committedOffset, err := readIfExists(clientPrefix + msg.Src + logKey)
+			committedOffset, err := readIfExists(formatClientKey(msg.Src, logKey))
 			if err != nil {
 				return err
 			}
@@ -135,4 +155,12 @@ func main() {
 	if err := n.Run(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func formatLogKey(key string, offset int) string {
+	return logPrefix + key + "-" + strconv.Itoa(offset)
+}
+
+func formatClientKey(client string, key string) string {
+	return clientPrefix + client + key
 }
