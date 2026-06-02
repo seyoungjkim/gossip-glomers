@@ -12,6 +12,20 @@ import (
 )
 
 // Run: ./../maelstrom/maelstrom test -w kafka --bin ~/go/bin/maelstrom-kafka-5b --node-count 2 --concurrency 2n --time-limit 20 --rate 1000
+// Result:
+//       :availability {:valid? true, :ok-fraction 0.99964577},
+//       :net {:all {:send-count 382318,
+//             :recv-count 382318,
+//             :msg-count 382318,
+//             :msgs-per-op 22.570282},
+//       :clients {:send-count 48170,
+//                 :recv-count 48170,
+//                 :msg-count 48170},
+//       :servers {:send-count 334148,
+//                 :recv-count 334148,
+//                 :msg-count 334148,
+//                 :msgs-per-op 19.72655},
+//       :valid? true},
 
 const logPrefix = "log-"
 const offsetPrefix = "offset-"
@@ -162,5 +176,5 @@ func formatLogKey(key string, offset int) string {
 }
 
 func formatClientKey(client string, key string) string {
-	return clientPrefix + client + key
+	return clientPrefix + client + "-" + key
 }
