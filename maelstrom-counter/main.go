@@ -9,15 +9,20 @@ import (
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
 
-// Run: ./../maelstrom/maelstrom test -w g-counter --bin ~/go/bin/maelstrom-counter --node-count 3 --rate 100 --time-limit 20 --nemesis partition
+// Run: ./../maelstrom/maelstrom test -w g-counter --bin ~/go/bin/maelstrom-counter --node-count 20 --rate 100 --time-limit 20 --nemesis partition
 
 type addMessage struct {
 	Delta int `json:"delta"`
 }
 
+type readNodeMessage struct {
+	Value int `json:"value"`
+}
+
 func main() {
 	n := maelstrom.NewNode()
 	kv := maelstrom.NewSeqKV(n)
+	nodeValues := make(map[string]int)
 
 	// Helper function to return key value as int, 0 otherwise
 	readIfExists := func(key string) (int, error) {
@@ -55,15 +60,37 @@ func main() {
 	})
 
 	n.Handle("read", func(msg maelstrom.Message) error {
-		value := 0
+		value, err := readIfExists(n.ID())
+		nodeValues[n.ID()] = value
+		if err != nil {
+			return err
+		}
 		for _, node := range n.NodeIDs() {
-			nodeValue, err := readIfExists(node)
+			if node == n.ID() {
+				continue
+			}
+			nodeMsg, err := n.SyncRPC(context.Background(), node, map[string]string{"type": "read_node"})
 			if err != nil {
+				// use in-memory value, which can be stale
+				value += nodeValues[node]
+				continue
+			}
+			var body readNodeMessage
+			if err := json.Unmarshal(nodeMsg.Body, &body); err != nil {
 				return err
 			}
-			value += nodeValue
+			value += body.Value
+			nodeValues[node] = body.Value
 		}
 		return n.Reply(msg, map[string]any{"type": "read_ok", "value": value})
+	})
+
+	n.Handle("read_node", func(msg maelstrom.Message) error {
+		value, err := readIfExists(n.ID())
+		if err != nil {
+			return err
+		}
+		return n.Reply(msg, map[string]any{"type": "read_node_ok", "value": value})
 	})
 
 	if err := n.Run(); err != nil {
