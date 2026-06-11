@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"hash"
 	"hash/fnv"
 	"log"
 	"strconv"
+	"sync"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
@@ -71,14 +71,14 @@ type sendInternalMessage struct {
 type server struct {
 	n              *maelstrom.Node
 	kv             *maelstrom.KV
-	hasher         hash.Hash
+	mu             *sync.Mutex
 	messageOffsets map[string]int
 }
 
 func main() {
 	n := maelstrom.NewNode()
 	kv := maelstrom.NewLinKV(n)
-	s := server{n, kv, fnv.New32a(), make(map[string]int)}
+	s := server{n, kv, &sync.Mutex{}, make(map[string]int)}
 
 	n.Handle("send", func(msg maelstrom.Message) error {
 		// Unmarshal the message body
@@ -194,10 +194,12 @@ func (s *server) readIfExists(key string) (*int, error) {
 }
 
 func (s *server) routeNode(key string) (string, error) {
-	sum, err := s.hasher.Write([]byte(key))
+	hasher := fnv.New32a()
+	_, err := hasher.Write([]byte(key))
 	if err != nil {
 		return "", err
 	}
+	sum := int(hasher.Sum32())
 	return fmt.Sprintf("n%d", sum%len(s.n.NodeIDs())), nil
 }
 
@@ -216,7 +218,8 @@ func (s *server) handleSend(msg maelstrom.Message) (int, error) {
 		}
 		prevOffset = -1
 	}
-	// Write new offset - should not need retries since each node has own key
+
+	// Write new offset - should not need CaS since each node has own key
 	messageOffset := prevOffset + 1
 	err = s.kv.CompareAndSwap(context.Background(), offsetPrefix+body.Key, prevOffset, messageOffset, true)
 	if err != nil {
