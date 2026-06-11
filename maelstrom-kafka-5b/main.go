@@ -12,7 +12,7 @@ import (
 )
 
 // Run: ./../maelstrom/maelstrom test -w kafka --bin ~/go/bin/maelstrom-kafka-5b --node-count 2 --concurrency 2n --time-limit 20 --rate 1000
-// Result:
+// Result (1 msg/poll):
 //       :availability {:valid? true, :ok-fraction 0.99964577},
 //       :net {:all {:send-count 382318,
 //             :recv-count 382318,
@@ -26,6 +26,22 @@ import (
 //                 :msg-count 334148,
 //                 :msgs-per-op 19.72655},
 //       :valid? true},
+// Result (5 msg/poll)
+//       :availability {:valid? true, :ok-fraction 0.9995857},
+//       :net {:all {:send-count 259414,
+//             :recv-count 259414,
+//             :msg-count 259414,
+//             :msgs-per-op 15.353575},
+//       :clients {:send-count 43188,
+//                 :recv-count 43188,
+//                 :msg-count 43188},
+//       :servers {:send-count 216226,
+//                 :recv-count 216226,
+//                 :msg-count 216226,
+//                 :msgs-per-op 12.797467},
+//       :valid? true},
+
+const pollMessageCount = 5
 
 const logPrefix = "log-"
 const offsetPrefix = "offset-"
@@ -120,13 +136,16 @@ func main() {
 		}
 		msgs := make(map[string][][]int)
 		for requestedKey, requestedOffset := range body.Offsets {
-			requestedLog, err := readIfExists(formatLogKey(requestedKey, requestedOffset))
-			if err != nil {
-				return err
+			var logs [][]int
+			for i := 0; i < pollMessageCount; i++ {
+				message, err := readIfExists(formatLogKey(requestedKey, requestedOffset+i))
+				if err != nil || message == nil {
+					break
+				}
+				logs = append(logs, []int{requestedOffset + i, *message})
 			}
-			if requestedLog != nil {
-				// Return message at offset
-				msgs[requestedKey] = [][]int{{requestedOffset, *requestedLog}}
+			if len(logs) > 0 {
+				msgs[requestedKey] = logs
 			}
 		}
 		return n.Reply(msg, map[string]any{"type": "poll_ok", "msgs": msgs})
