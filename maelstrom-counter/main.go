@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"sync"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
@@ -23,6 +24,7 @@ func main() {
 	n := maelstrom.NewNode()
 	kv := maelstrom.NewSeqKV(n)
 	nodeValues := make(map[string]int)
+	mu := &sync.Mutex{}
 
 	// Helper function to return key value as int, 0 otherwise
 	readIfExists := func(key string) (int, error) {
@@ -61,10 +63,12 @@ func main() {
 
 	n.Handle("read", func(msg maelstrom.Message) error {
 		value, err := readIfExists(n.ID())
-		nodeValues[n.ID()] = value
 		if err != nil {
 			return err
 		}
+		mu.Lock()
+		nodeValues[n.ID()] = value
+		mu.Unlock()
 		for _, node := range n.NodeIDs() {
 			if node == n.ID() {
 				continue
@@ -72,7 +76,9 @@ func main() {
 			nodeMsg, err := n.SyncRPC(context.Background(), node, map[string]string{"type": "read_node"})
 			if err != nil {
 				// use in-memory value, which can be stale
+				mu.Lock()
 				value += nodeValues[node]
+				mu.Unlock()
 				continue
 			}
 			var body readNodeMessage
@@ -80,7 +86,9 @@ func main() {
 				return err
 			}
 			value += body.Value
+			mu.Lock()
 			nodeValues[node] = body.Value
+			mu.Unlock()
 		}
 		return n.Reply(msg, map[string]any{"type": "read_ok", "value": value})
 	})

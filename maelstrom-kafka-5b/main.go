@@ -65,7 +65,7 @@ func main() {
 		return offset, nil
 	}
 
-	// Helper function to populate key value; returns nil if value doesn't exist
+	// Helper function to get key value; returns nil if value doesn't exist
 	readIfExists := func(key string) (*int, error) {
 		value, err := kv.ReadInt(context.Background(), key)
 		if err != nil {
