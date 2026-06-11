@@ -29,18 +29,18 @@ import (
 //                 :msgs-per-op 19.72655},
 //       :valid? true},
 // 5c Result:
-//       :availability {:valid? true, :ok-fraction 0.99952906},
-//       :net {:all {:send-count 432798,
-//             :recv-count 432798,
-//             :msg-count 432798,
-//             :msgs-per-op 25.47669},
-//       :clients {:send-count 47988,
-//                 :recv-count 47988,
-//                 :msg-count 47988},
-//       :servers {:send-count 384810,
-//                 :recv-count 384810,
-//                 :msg-count 384810,
-//                 :msgs-per-op 22.651873},
+//       :availability {:valid? true, :ok-fraction 0.9994114},
+//       :net {:all {:send-count 439438,
+//             :recv-count 439438,
+//             :msg-count 439438,
+//             :msgs-per-op 25.866032},
+//       :clients {:send-count 48510,
+//                 :recv-count 48510,
+//                 :msg-count 48510},
+//       :servers {:send-count 390928,
+//                 :recv-count 390928,
+//                 :msg-count 390928,
+//                 :msgs-per-op 23.010654},
 //       :valid? true},
 
 const logPrefix = "log-"
@@ -209,19 +209,29 @@ func (s *server) handleSend(msg maelstrom.Message) (int, error) {
 	if err := json.Unmarshal(msg.Body, &body); err != nil {
 		return -1, err
 	}
-	// Read previous offset
-	prevOffset, err := s.kv.ReadInt(context.Background(), offsetPrefix+body.Key)
-	if err != nil {
-		rpcErr, ok := errors.AsType[*maelstrom.RPCError](err)
-		if !ok || rpcErr.Code != maelstrom.KeyDoesNotExist {
-			return -1, err
+
+	// Read previous offset from memory, falling back to KV if needed
+	s.mu.Lock()
+	_, ok := s.messageOffsets[body.Key]
+	if !ok { // Grab previous offset
+		prevOffset, err := s.kv.ReadInt(context.Background(), offsetPrefix+body.Key)
+		if err != nil {
+			rpcErr, ok := errors.AsType[*maelstrom.RPCError](err)
+			if ok && rpcErr.Code == maelstrom.KeyDoesNotExist {
+				prevOffset = -1
+			} else {
+				s.mu.Unlock()
+				return -1, err
+			}
 		}
-		prevOffset = -1
+		s.messageOffsets[body.Key] = prevOffset
 	}
+	s.messageOffsets[body.Key]++
+	messageOffset := s.messageOffsets[body.Key]
+	s.mu.Unlock()
 
 	// Write new offset - should not need CaS since each node has own key
-	messageOffset := prevOffset + 1
-	err = s.kv.CompareAndSwap(context.Background(), offsetPrefix+body.Key, prevOffset, messageOffset, true)
+	err := s.kv.Write(context.Background(), offsetPrefix+body.Key, messageOffset)
 	if err != nil {
 		return -1, err
 	}
