@@ -113,12 +113,10 @@ type sendInternalMessage struct {
 }
 
 type server struct {
-	n              *maelstrom.Node
-	kv             *maelstrom.KV
-	keyMutex       *sync.Mutex
-	logMutex       *sync.Mutex
-	clientMutex    *sync.Mutex
-	messageOffsets map[string]int
+	n             *maelstrom.Node
+	kv            *maelstrom.KV
+	logMutexes    *sync.Map
+	clientMutexes *sync.Map
 }
 
 func main() {
@@ -127,10 +125,8 @@ func main() {
 	s := server{
 		n,
 		kv,
-		&sync.Mutex{},
-		&sync.Mutex{},
-		&sync.Mutex{},
-		make(map[string]int),
+		&sync.Map{},
+		&sync.Map{},
 	}
 
 	n.Handle("send", func(msg maelstrom.Message) error {
@@ -271,19 +267,6 @@ func main() {
 	}
 }
 
-// Helper function to get key value; returns nil if value doesn't exist
-func (s *server) readIntIfExists(key string) (*int, error) {
-	value, err := s.kv.ReadInt(context.Background(), key)
-	if err != nil {
-		rpcErr, ok := errors.AsType[*maelstrom.RPCError](err)
-		if ok && rpcErr.Code == maelstrom.KeyDoesNotExist {
-			return nil, nil
-		}
-		return nil, err
-	}
-	return &value, nil
-}
-
 // Helper function to get key value; returns empty map if value doesn't exist
 func (s *server) readOffsetsIfExists(key string) (map[string]int, error) {
 	m := map[string]int{}
@@ -323,35 +306,29 @@ func (s *server) routeNode(key string) (string, error) {
 }
 
 func (s *server) handleSend(key string, message int) (int, error) {
-	// Read previous offset from memory, falling back to KV if needed
-	s.keyMutex.Lock()
-	_, ok := s.messageOffsets[key]
-	if !ok { // Grab previous offset
-		prevOffset, err := s.kv.ReadInt(context.Background(), offsetPrefix+key)
-		if err != nil {
-			rpcErr, ok := errors.AsType[*maelstrom.RPCError](err)
-			if ok && rpcErr.Code == maelstrom.KeyDoesNotExist {
-				prevOffset = -1
-			} else {
-				s.keyMutex.Unlock()
-				return -1, err
-			}
+	mu, _ := s.logMutexes.LoadOrStore(key, &sync.Mutex{})
+	mu.(*sync.Mutex).Lock()
+	defer mu.(*sync.Mutex).Unlock()
+
+	// Read previous offset
+	prevOffset, err := s.kv.ReadInt(context.Background(), offsetPrefix+key)
+	if err != nil {
+		rpcErr, ok := errors.AsType[*maelstrom.RPCError](err)
+		if ok && rpcErr.Code == maelstrom.KeyDoesNotExist {
+			prevOffset = -1
+		} else {
+			return -1, err
 		}
-		s.messageOffsets[key] = prevOffset
 	}
-	s.messageOffsets[key]++
-	messageOffset := s.messageOffsets[key]
-	s.keyMutex.Unlock()
+	messageOffset := prevOffset + 1
 
 	// Write new offset - should not need CaS since each node has own key
-	err := s.kv.Write(context.Background(), offsetPrefix+key, messageOffset)
+	err = s.kv.Write(context.Background(), offsetPrefix+key, messageOffset)
 	if err != nil {
 		return -1, err
 	}
 
 	// Update logs by reading existing and adding new
-	s.logMutex.Lock()
-	defer s.logMutex.Unlock()
 	logs, err := s.readLogsIfExists(logPrefix + key)
 	if err != nil {
 		return -1, err
@@ -366,8 +343,9 @@ func (s *server) handleSend(key string, message int) (int, error) {
 
 // Read and write offsets from "client-{CLIENT_NAME}" key
 func (s *server) handleCommitOffsets(newOffsets map[string]int, client string) error {
-	s.clientMutex.Lock()
-	defer s.clientMutex.Unlock()
+	mu, _ := s.clientMutexes.LoadOrStore(client, &sync.Mutex{})
+	mu.(*sync.Mutex).Lock()
+	defer mu.(*sync.Mutex).Unlock()
 
 	clientOffsets, err := s.readOffsetsIfExists(clientPrefix + client)
 	if err != nil {
