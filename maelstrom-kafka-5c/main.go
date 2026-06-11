@@ -28,19 +28,19 @@ import (
 //                 :msg-count 334148,
 //                 :msgs-per-op 19.72655},
 //       :valid? true},
-// 5c Result:
-//       :availability {:valid? true, :ok-fraction 0.9994114},
-//       :net {:all {:send-count 439438,
-//             :recv-count 439438,
-//             :msg-count 439438,
-//             :msgs-per-op 25.866032},
-//       :clients {:send-count 48510,
-//                 :recv-count 48510,
-//                 :msg-count 48510},
-//       :servers {:send-count 390928,
-//                 :recv-count 390928,
-//                 :msg-count 390928,
-//                 :msgs-per-op 23.010654},
+// 5c Result after optimizing client offsets:
+//       :availability {:valid? true, :ok-fraction 0.99953276},
+//       :net {:all {:send-count 261346,
+//             :recv-count 261346,
+//             :msg-count 261346,
+//             :msgs-per-op 15.263754},
+//       :clients {:send-count 48318,
+//                 :recv-count 48318,
+//                 :msg-count 48318},
+//       :servers {:send-count 213028,
+//                 :recv-count 213028,
+//                 :msg-count 213028,
+//                 :msgs-per-op 12.441771},
 //       :valid? true},
 
 const logPrefix = "log-"
@@ -58,6 +58,7 @@ type pollMessage struct {
 
 type commitOffsetsMessage struct {
 	Offsets map[string]int `json:"offsets"`
+	Client  string         `json:"client"`
 }
 
 type listCommittedOffsetsMessage struct {
@@ -78,7 +79,12 @@ type server struct {
 func main() {
 	n := maelstrom.NewNode()
 	kv := maelstrom.NewLinKV(n)
-	s := server{n, kv, &sync.Mutex{}, make(map[string]int)}
+	s := server{
+		n,
+		kv,
+		&sync.Mutex{},
+		make(map[string]int),
+	}
 
 	n.Handle("send", func(msg maelstrom.Message) error {
 		// Unmarshal the message body
@@ -86,17 +92,20 @@ func main() {
 		if err := json.Unmarshal(msg.Body, &body); err != nil {
 			return err
 		}
+		// Find which node should handle send for this topic
 		nodeToHandle, err := s.routeNode(body.Key)
 		if err != nil {
 			return err
 		}
+		// If current node, send
 		if n.ID() == nodeToHandle {
-			offset, err := s.handleSend(msg)
+			offset, err := s.handleSend(body.Key, body.Msg)
 			if err != nil {
 				return err
 			}
 			return n.Reply(msg, map[string]any{"type": "send_ok", "offset": offset})
 		}
+		// Otherwise, ask other node to send
 		nodeMsg, err := n.SyncRPC(context.Background(), nodeToHandle, map[string]any{
 			"type": "send_internal",
 			"key":  body.Key,
@@ -105,7 +114,6 @@ func main() {
 		if err != nil {
 			return err
 		}
-		// Unmarshal the message body
 		var nodeBody sendInternalMessage
 		if err := json.Unmarshal(nodeMsg.Body, &nodeBody); err != nil {
 			return err
@@ -114,7 +122,12 @@ func main() {
 	})
 
 	n.Handle("send_internal", func(msg maelstrom.Message) error {
-		offset, err := s.handleSend(msg)
+		// Unmarshal the message body
+		var body sendMessage
+		if err := json.Unmarshal(msg.Body, &body); err != nil {
+			return err
+		}
+		offset, err := s.handleSend(body.Key, body.Msg)
 		if err != nil {
 			return err
 		}
@@ -129,7 +142,7 @@ func main() {
 		}
 		msgs := make(map[string][][]int)
 		for requestedKey, requestedOffset := range body.Offsets {
-			requestedLog, err := s.readIfExists(formatLogKey(requestedKey, requestedOffset))
+			requestedLog, err := s.readIntIfExists(formatLogKey(requestedKey, requestedOffset))
 			if err != nil {
 				return err
 			}
@@ -147,13 +160,42 @@ func main() {
 		if err := json.Unmarshal(msg.Body, &body); err != nil {
 			return err
 		}
-		for logKey, logOffset := range body.Offsets {
-			err := kv.Write(context.Background(), formatClientKey(msg.Src, logKey), logOffset)
+		// Find which node should handle commit for this client
+		nodeToHandle, err := s.routeNode(msg.Src)
+		if err != nil {
+			return err
+		}
+		// If current node, handle commit
+		if n.ID() == nodeToHandle {
+			err = s.handleCommitOffsets(body.Offsets, msg.Src)
 			if err != nil {
 				return err
 			}
+			return n.Reply(msg, map[string]any{"type": "commit_offsets_ok"})
+		}
+		// Otherwise, ask other node to commit
+		_, err = n.SyncRPC(context.Background(), nodeToHandle, map[string]any{
+			"type":    "commit_offsets_internal",
+			"offsets": body.Offsets,
+			"client":  msg.Src,
+		})
+		if err != nil {
+			return err
 		}
 		return n.Reply(msg, map[string]any{"type": "commit_offsets_ok"})
+	})
+
+	n.Handle("commit_offsets_internal", func(msg maelstrom.Message) error {
+		// Unmarshal the message body
+		var body commitOffsetsMessage
+		if err := json.Unmarshal(msg.Body, &body); err != nil {
+			return err
+		}
+		err := s.handleCommitOffsets(body.Offsets, body.Client)
+		if err != nil {
+			return err
+		}
+		return n.Reply(msg, map[string]any{"type": "commit_offsets_internal_ok"})
 	})
 
 	n.Handle("list_committed_offsets", func(msg maelstrom.Message) error {
@@ -162,15 +204,9 @@ func main() {
 		if err := json.Unmarshal(msg.Body, &body); err != nil {
 			return err
 		}
-		var offsets = make(map[string]int)
-		for _, logKey := range body.Keys {
-			committedOffset, err := s.readIfExists(formatClientKey(msg.Src, logKey))
-			if err != nil {
-				return err
-			}
-			if committedOffset != nil {
-				offsets[logKey] = *committedOffset
-			}
+		offsets, err := s.readMapIfExists(clientPrefix + msg.Src)
+		if err != nil {
+			return err
 		}
 		return n.Reply(msg, map[string]any{"type": "list_committed_offsets_ok", "offsets": offsets})
 	})
@@ -181,7 +217,7 @@ func main() {
 }
 
 // Helper function to get key value; returns nil if value doesn't exist
-func (s *server) readIfExists(key string) (*int, error) {
+func (s *server) readIntIfExists(key string) (*int, error) {
 	value, err := s.kv.ReadInt(context.Background(), key)
 	if err != nil {
 		rpcErr, ok := errors.AsType[*maelstrom.RPCError](err)
@@ -191,6 +227,20 @@ func (s *server) readIfExists(key string) (*int, error) {
 		return nil, err
 	}
 	return &value, nil
+}
+
+// Helper function to get key value; returns empty map if value doesn't exist
+func (s *server) readMapIfExists(key string) (map[string]int, error) {
+	m := map[string]int{}
+	err := s.kv.ReadInto(context.Background(), key, m)
+	if err != nil {
+		rpcErr, ok := errors.AsType[*maelstrom.RPCError](err)
+		if ok && rpcErr.Code == maelstrom.KeyDoesNotExist {
+			return m, nil
+		}
+		return nil, err
+	}
+	return m, nil
 }
 
 func (s *server) routeNode(key string) (string, error) {
@@ -203,18 +253,12 @@ func (s *server) routeNode(key string) (string, error) {
 	return fmt.Sprintf("n%d", sum%len(s.n.NodeIDs())), nil
 }
 
-func (s *server) handleSend(msg maelstrom.Message) (int, error) {
-	// Unmarshal the message body
-	var body sendMessage
-	if err := json.Unmarshal(msg.Body, &body); err != nil {
-		return -1, err
-	}
-
+func (s *server) handleSend(key string, message int) (int, error) {
 	// Read previous offset from memory, falling back to KV if needed
 	s.mu.Lock()
-	_, ok := s.messageOffsets[body.Key]
+	_, ok := s.messageOffsets[key]
 	if !ok { // Grab previous offset
-		prevOffset, err := s.kv.ReadInt(context.Background(), offsetPrefix+body.Key)
+		prevOffset, err := s.kv.ReadInt(context.Background(), offsetPrefix+key)
 		if err != nil {
 			rpcErr, ok := errors.AsType[*maelstrom.RPCError](err)
 			if ok && rpcErr.Code == maelstrom.KeyDoesNotExist {
@@ -224,28 +268,44 @@ func (s *server) handleSend(msg maelstrom.Message) (int, error) {
 				return -1, err
 			}
 		}
-		s.messageOffsets[body.Key] = prevOffset
+		s.messageOffsets[key] = prevOffset
 	}
-	s.messageOffsets[body.Key]++
-	messageOffset := s.messageOffsets[body.Key]
+	s.messageOffsets[key]++
+	messageOffset := s.messageOffsets[key]
 	s.mu.Unlock()
 
 	// Write new offset - should not need CaS since each node has own key
-	err := s.kv.Write(context.Background(), offsetPrefix+body.Key, messageOffset)
+	err := s.kv.Write(context.Background(), offsetPrefix+key, messageOffset)
 	if err != nil {
 		return -1, err
 	}
-	err = s.kv.Write(context.Background(), formatLogKey(body.Key, messageOffset), body.Msg)
+	err = s.kv.Write(context.Background(), formatLogKey(key, messageOffset), message)
 	if err != nil {
 		return -1, err
 	}
 	return messageOffset, nil
 }
 
-func formatLogKey(key string, offset int) string {
-	return logPrefix + key + "-" + strconv.Itoa(offset)
+// Read and write offsets from "client-{CLIENT_NAME}" key
+func (s *server) handleCommitOffsets(newOffsets map[string]int, client string) error {
+	s.mu.Lock()
+	clientOffsets, err := s.readMapIfExists(clientPrefix + client)
+	if err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	for logKey, logOffset := range newOffsets {
+		clientOffsets[logKey] = logOffset
+	}
+	err = s.kv.Write(context.Background(), clientPrefix+client, &clientOffsets)
+	if err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	s.mu.Unlock()
+	return nil
 }
 
-func formatClientKey(client string, key string) string {
-	return clientPrefix + client + "-" + key
+func formatLogKey(key string, offset int) string {
+	return logPrefix + key + "-" + strconv.Itoa(offset)
 }
