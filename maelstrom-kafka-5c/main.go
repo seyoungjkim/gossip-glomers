@@ -14,7 +14,7 @@ import (
 
 // Run: ./../maelstrom/maelstrom test -w kafka --bin ~/go/bin/maelstrom-kafka-5c --node-count 2 --concurrency 2n --time-limit 20 --rate 1000
 
-const pollMessageCount = 10
+const pollMessageCount = 20
 
 const logPrefix = "log-"
 const clientPrefix = "client-"
@@ -118,6 +118,7 @@ func main() {
 		}
 		requestedMessages := make(map[string][][]int)
 		for requestedKey, requestedOffset := range body.Offsets {
+			// Get read lock since we might read from memory
 			mu, _ := s.logMutexes.LoadOrStore(requestedKey, &sync.RWMutex{})
 			mu.(*sync.RWMutex).RLock()
 			allMessages, err := s.readLogMessagesIfExists(requestedKey)
@@ -128,8 +129,7 @@ func main() {
 			// Grab up to `pollMessageCount` logs
 			var messages [][]int
 			for i := requestedOffset; i < min(requestedOffset+pollMessageCount, len(allMessages)); i++ {
-				message := allMessages[i]
-				messages = append(messages, []int{i, message})
+				messages = append(messages, []int{i, allMessages[i]})
 			}
 			mu.(*sync.RWMutex).RUnlock()
 			if len(messages) > 0 {
@@ -189,6 +189,7 @@ func main() {
 		if err := json.Unmarshal(msg.Body, &body); err != nil {
 			return err
 		}
+		// Get read lock since we might read from memory
 		mu, _ := s.clientMutexes.LoadOrStore(msg.Src, &sync.RWMutex{})
 		mu.(*sync.RWMutex).RLock()
 		allOffsets, err := s.readOffsetsIfExists(msg.Src)
@@ -261,23 +262,23 @@ func (s *server) handleCommitOffsets(newOffsets map[string]int, client string) e
 	return nil
 }
 
-// Helper function to get key value; returns empty map if value doesn't exist
+// Helper function to get key value; returns empty slice if value doesn't exist
 // Attempts to read from in-memory store and falls back to KV store.
 func (s *server) readLogMessagesIfExists(key string) ([]int, error) {
 	logs, ok := s.logMessages.Load(key)
 	if ok {
 		return logs.([]int), nil
 	}
-	var m []int
-	err := s.kv.ReadInto(context.Background(), logPrefix+key, &m)
+	var l []int
+	err := s.kv.ReadInto(context.Background(), logPrefix+key, &l)
 	if err != nil {
 		rpcErr, ok := errors.AsType[*maelstrom.RPCError](err)
 		if ok && rpcErr.Code == maelstrom.KeyDoesNotExist {
-			return m, nil
+			return l, nil
 		}
 		return nil, err
 	}
-	return m, nil
+	return l, nil
 }
 
 // Helper function to write key value to both in-memory and KV stores
