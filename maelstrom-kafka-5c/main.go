@@ -41,7 +41,7 @@ import (
 //                 :msg-count 216226,
 //                 :msgs-per-op 12.797467},
 //       :valid? true},
-// 5c result after optimizing client offsets (1 msg/poll):
+// 5c result after optimizing client offsets + inc offset (1 msg/poll):
 //       :availability {:valid? true, :ok-fraction 0.99953276},
 //       :net {:all {:send-count 261346,
 //             :recv-count 261346,
@@ -55,7 +55,20 @@ import (
 //                 :msg-count 213028,
 //                 :msgs-per-op 12.441771},
 //       :valid? true},
-// 5c result after optimizing client offsets and logs (5 msg/poll):
+// 5c result after optimizing client offsets and trying to optimize logs, no inc offset (1 msg/poll):
+//       :net {:all {:send-count 300574,
+//             :recv-count 300574,
+//             :msg-count 300574,
+//             :msgs-per-op 17.521072},
+//       :clients {:send-count 48574,
+//                 :recv-count 48574,
+//                 :msg-count 48574},
+//       :servers {:send-count 252000,
+//                 :recv-count 252000,
+//                 :msg-count 252000,
+//                 :msgs-per-op 14.689595},
+//       :valid? true}
+// 5c result after optimizing client offsets, logs, inc offset (5 msg/poll):
 //       :availability {:valid? true, :ok-fraction 0.9995894},
 //       :net {:all {:send-count 169266,
 //             :recv-count 169266,
@@ -83,7 +96,6 @@ import (
 //                 :msg-count 110300,
 //                 :msgs-per-op 6.477186},
 //       :valid? true},
-// Then I removed the in-memory offset counter and performance got slightly worse, but that's okay.
 
 const pollMessageCount = 10
 
@@ -118,6 +130,8 @@ type server struct {
 	kv            *maelstrom.KV
 	logMutexes    *sync.Map
 	clientMutexes *sync.Map
+	logOffsets    *sync.Map
+	clientOffsets *sync.Map
 }
 
 func main() {
@@ -126,6 +140,8 @@ func main() {
 	s := server{
 		n,
 		kv,
+		&sync.Map{},
+		&sync.Map{},
 		&sync.Map{},
 		&sync.Map{},
 	}
@@ -315,23 +331,28 @@ func (s *server) readLogsIfExists(key string) (map[int]int, error) {
 
 // Increment offsets + read and write logs from "log-{KEY}"
 func (s *server) handleSend(key string, message int) (int, error) {
+	var err error
 	mu, _ := s.logMutexes.LoadOrStore(key, &sync.Mutex{})
 	mu.(*sync.Mutex).Lock()
 	defer mu.(*sync.Mutex).Unlock()
 
 	// Read previous offset
-	prevOffset, err := s.kv.ReadInt(context.Background(), offsetPrefix+key)
-	if err != nil {
-		rpcErr, ok := errors.AsType[*maelstrom.RPCError](err)
-		if ok && rpcErr.Code == maelstrom.KeyDoesNotExist {
-			prevOffset = -1
-		} else {
-			return -1, err
+	prevOffset, ok := s.logOffsets.Load(key)
+	if !ok { // if not in offsets, fall back to KV
+		prevOffset, err = s.kv.ReadInt(context.Background(), offsetPrefix+key)
+		if err != nil {
+			rpcErr, ok := errors.AsType[*maelstrom.RPCError](err)
+			if ok && rpcErr.Code == maelstrom.KeyDoesNotExist {
+				prevOffset = -1
+			} else {
+				return -1, err
+			}
 		}
 	}
-	messageOffset := prevOffset + 1
+	messageOffset := prevOffset.(int) + 1
 
 	// Write new offset - should not need CaS since each node has own key
+	s.logOffsets.Store(key, messageOffset)
 	err = s.kv.Write(context.Background(), offsetPrefix+key, messageOffset)
 	if err != nil {
 		return -1, err
