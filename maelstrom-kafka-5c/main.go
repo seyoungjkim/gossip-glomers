@@ -17,7 +17,6 @@ import (
 const pollMessageCount = 10
 
 const logPrefix = "log-"
-const offsetPrefix = "offset-"
 const clientPrefix = "client-"
 
 type sendMessage struct {
@@ -47,7 +46,6 @@ type server struct {
 	kv            *maelstrom.KV
 	logMutexes    *sync.Map
 	clientMutexes *sync.Map
-	logOffsets    *sync.Map
 	logMessages   *sync.Map
 	clientOffsets *sync.Map
 }
@@ -58,7 +56,6 @@ func main() {
 	s := server{
 		n,
 		kv,
-		&sync.Map{},
 		&sync.Map{},
 		&sync.Map{},
 		&sync.Map{},
@@ -121,23 +118,20 @@ func main() {
 		}
 		requestedMessages := make(map[string][][]int)
 		for requestedKey, requestedOffset := range body.Offsets {
-			mu, _ := s.logMutexes.LoadOrStore(requestedKey, &sync.Mutex{})
-			mu.(*sync.Mutex).Lock()
+			mu, _ := s.logMutexes.LoadOrStore(requestedKey, &sync.RWMutex{})
+			mu.(*sync.RWMutex).RLock()
 			allMessages, err := s.readLogMessagesIfExists(requestedKey)
 			if err != nil {
-				mu.(*sync.Mutex).Unlock()
+				mu.(*sync.RWMutex).RUnlock()
 				return err
 			}
 			// Grab up to `pollMessageCount` logs
 			var messages [][]int
-			for i := 0; i < pollMessageCount; i++ {
-				message, ok := allMessages[requestedOffset+i]
-				if !ok {
-					break
-				}
-				messages = append(messages, []int{requestedOffset + i, message})
+			for i := requestedOffset; i < min(requestedOffset+pollMessageCount, len(allMessages)); i++ {
+				message := allMessages[i]
+				messages = append(messages, []int{i, message})
 			}
-			mu.(*sync.Mutex).Unlock()
+			mu.(*sync.RWMutex).RUnlock()
 			if len(messages) > 0 {
 				requestedMessages[requestedKey] = messages
 			}
@@ -195,11 +189,11 @@ func main() {
 		if err := json.Unmarshal(msg.Body, &body); err != nil {
 			return err
 		}
-		mu, _ := s.clientMutexes.LoadOrStore(msg.Src, &sync.Mutex{})
-		mu.(*sync.Mutex).Lock()
+		mu, _ := s.clientMutexes.LoadOrStore(msg.Src, &sync.RWMutex{})
+		mu.(*sync.RWMutex).RLock()
 		allOffsets, err := s.readOffsetsIfExists(msg.Src)
 		if err != nil {
-			mu.(*sync.Mutex).Unlock()
+			mu.(*sync.RWMutex).RUnlock()
 			return err
 		}
 		requestedOffsets := map[string]int{}
@@ -209,7 +203,7 @@ func main() {
 				requestedOffsets[key] = offset
 			}
 		}
-		mu.(*sync.Mutex).Unlock()
+		mu.(*sync.RWMutex).RUnlock()
 		return n.Reply(msg, map[string]any{"type": "list_committed_offsets_ok", "offsets": requestedOffsets})
 	})
 
@@ -230,28 +224,17 @@ func (s *server) routeNode(key string) (string, error) {
 
 // Increment offsets + read and write logs from "log-{KEY}"
 func (s *server) handleSend(key string, message int) (int, error) {
-	mu, _ := s.logMutexes.LoadOrStore(key, &sync.Mutex{})
-	mu.(*sync.Mutex).Lock()
-	defer mu.(*sync.Mutex).Unlock()
-
-	// Read previous offset
-	prevOffset, err := s.readLogOffsetIfExists(key)
-	if err != nil {
-		return -1, err
-	}
-	messageOffset := prevOffset + 1
-
-	// Write new offset
-	if err = s.writeLogOffset(key, messageOffset); err != nil {
-		return -1, err
-	}
+	mu, _ := s.logMutexes.LoadOrStore(key, &sync.RWMutex{})
+	mu.(*sync.RWMutex).Lock()
+	defer mu.(*sync.RWMutex).Unlock()
 
 	// Update logs by reading existing and adding new
 	logs, err := s.readLogMessagesIfExists(key)
 	if err != nil {
 		return -1, err
 	}
-	logs[messageOffset] = message
+	messageOffset := len(logs)
+	logs = append(logs, message)
 	if err = s.writeLogMessages(key, logs); err != nil {
 		return -1, err
 	}
@@ -260,9 +243,9 @@ func (s *server) handleSend(key string, message int) (int, error) {
 
 // Read and write offsets from "client-{CLIENT_NAME}" key
 func (s *server) handleCommitOffsets(newOffsets map[string]int, client string) error {
-	mu, _ := s.clientMutexes.LoadOrStore(client, &sync.Mutex{})
-	mu.(*sync.Mutex).Lock()
-	defer mu.(*sync.Mutex).Unlock()
+	mu, _ := s.clientMutexes.LoadOrStore(client, &sync.RWMutex{})
+	mu.(*sync.RWMutex).Lock()
+	defer mu.(*sync.RWMutex).Unlock()
 
 	// Update offsets for client
 	clientOffsets, err := s.readOffsetsIfExists(client)
@@ -278,44 +261,14 @@ func (s *server) handleCommitOffsets(newOffsets map[string]int, client string) e
 	return nil
 }
 
-// Helper function to get key value; returns -1 if value doesn't exist.
-// Attempts to read from in-memory store and falls back to KV store.
-func (s *server) readLogOffsetIfExists(key string) (int, error) {
-	offset, ok := s.logOffsets.Load(key)
-	if ok {
-		return offset.(int), nil
-	}
-	prevOffset, err := s.kv.ReadInt(context.Background(), offsetPrefix+key)
-	if err != nil {
-		rpcErr, ok := errors.AsType[*maelstrom.RPCError](err)
-		if ok && rpcErr.Code == maelstrom.KeyDoesNotExist {
-			prevOffset = -1
-		} else {
-			return -1, err
-		}
-	}
-	return prevOffset, nil
-}
-
-// Helper function to write key value to both in-memory and KV stores
-func (s *server) writeLogOffset(key string, offset int) error {
-	// should not need CaS since each node has own key
-	err := s.kv.Write(context.Background(), offsetPrefix+key, offset)
-	if err != nil {
-		return err
-	}
-	s.logOffsets.Store(key, offset)
-	return nil
-}
-
 // Helper function to get key value; returns empty map if value doesn't exist
 // Attempts to read from in-memory store and falls back to KV store.
-func (s *server) readLogMessagesIfExists(key string) (map[int]int, error) {
+func (s *server) readLogMessagesIfExists(key string) ([]int, error) {
 	logs, ok := s.logMessages.Load(key)
 	if ok {
-		return logs.(map[int]int), nil
+		return logs.([]int), nil
 	}
-	m := map[int]int{}
+	var m []int
 	err := s.kv.ReadInto(context.Background(), logPrefix+key, &m)
 	if err != nil {
 		rpcErr, ok := errors.AsType[*maelstrom.RPCError](err)
@@ -328,7 +281,7 @@ func (s *server) readLogMessagesIfExists(key string) (map[int]int, error) {
 }
 
 // Helper function to write key value to both in-memory and KV stores
-func (s *server) writeLogMessages(key string, messages map[int]int) error {
+func (s *server) writeLogMessages(key string, messages []int) error {
 	err := s.kv.Write(context.Background(), logPrefix+key, messages)
 	if err != nil {
 		return err

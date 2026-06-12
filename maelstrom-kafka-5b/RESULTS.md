@@ -111,3 +111,19 @@
                  :msgs-per-op 4.326091},
        :valid? true},
 ```
+## No explicit offset handling
+```
+:availability {:valid? true, :ok-fraction 0.9995854},
+ :net {:all {:send-count 95144,
+             :recv-count 95144,
+             :msg-count 95144,
+             :msgs-per-op 5.6351576},
+       :clients {:send-count 42020,
+                 :recv-count 42020,
+                 :msg-count 42020},
+       :servers {:send-count 53124,
+                 :recv-count 53124,
+                 :msg-count 53124,
+                 :msgs-per-op 3.1464107},
+       :valid? true}
+```
