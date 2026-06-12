@@ -131,6 +131,7 @@ type server struct {
 	logMutexes    *sync.Map
 	clientMutexes *sync.Map
 	logOffsets    *sync.Map
+	logMessages   *sync.Map
 	clientOffsets *sync.Map
 }
 
@@ -140,6 +141,7 @@ func main() {
 	s := server{
 		n,
 		kv,
+		&sync.Map{},
 		&sync.Map{},
 		&sync.Map{},
 		&sync.Map{},
@@ -359,12 +361,17 @@ func (s *server) handleSend(key string, message int) (int, error) {
 	}
 
 	// Update logs by reading existing and adding new
-	logs, err := s.readLogsIfExists(logPrefix + key)
-	if err != nil {
-		return -1, err
+	logs, ok := s.logMessages.Load(key)
+	if !ok { // fall back to KV
+		logs, err = s.readLogsIfExists(logPrefix + key)
+		if err != nil {
+			return -1, err
+		}
 	}
-	logs[messageOffset] = message
-	err = s.kv.Write(context.Background(), logPrefix+key, logs)
+	logMessages := logs.(map[int]int)
+	logMessages[messageOffset] = message
+	s.logMessages.Store(key, logMessages)
+	err = s.kv.Write(context.Background(), logPrefix+key, logMessages)
 	if err != nil {
 		return -1, err
 	}
