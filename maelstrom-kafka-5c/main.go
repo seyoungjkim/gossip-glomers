@@ -13,89 +13,6 @@ import (
 )
 
 // Run: ./../maelstrom/maelstrom test -w kafka --bin ~/go/bin/maelstrom-kafka-5c --node-count 2 --concurrency 2n --time-limit 20 --rate 1000
-// 5b result (1 msg/poll):
-//       :availability {:valid? true, :ok-fraction 0.99964577},
-//       :net {:all {:send-count 382318,
-//             :recv-count 382318,
-//             :msg-count 382318,
-//             :msgs-per-op 22.570282},
-//       :clients {:send-count 48170,
-//                 :recv-count 48170,
-//                 :msg-count 48170},
-//       :servers {:send-count 334148,
-//                 :recv-count 334148,
-//                 :msg-count 334148,
-//                 :msgs-per-op 19.72655},
-//       :valid? true},
-// 5b result (5 msg/poll)
-//       :availability {:valid? true, :ok-fraction 0.9995857},
-//       :net {:all {:send-count 259414,
-//             :recv-count 259414,
-//             :msg-count 259414,
-//             :msgs-per-op 15.353575},
-//       :clients {:send-count 43188,
-//                 :recv-count 43188,
-//                 :msg-count 43188},
-//       :servers {:send-count 216226,
-//                 :recv-count 216226,
-//                 :msg-count 216226,
-//                 :msgs-per-op 12.797467},
-//       :valid? true},
-// 5c result after optimizing client offsets + inc offset (1 msg/poll):
-//       :availability {:valid? true, :ok-fraction 0.99953276},
-//       :net {:all {:send-count 261346,
-//             :recv-count 261346,
-//             :msg-count 261346,
-//             :msgs-per-op 15.263754},
-//       :clients {:send-count 48318,
-//                 :recv-count 48318,
-//                 :msg-count 48318},
-//       :servers {:send-count 213028,
-//                 :recv-count 213028,
-//                 :msg-count 213028,
-//                 :msgs-per-op 12.441771},
-//       :valid? true},
-// 5c result after optimizing client offsets and trying to optimize logs, no inc offset (1 msg/poll):
-//       :net {:all {:send-count 300574,
-//             :recv-count 300574,
-//             :msg-count 300574,
-//             :msgs-per-op 17.521072},
-//       :clients {:send-count 48574,
-//                 :recv-count 48574,
-//                 :msg-count 48574},
-//       :servers {:send-count 252000,
-//                 :recv-count 252000,
-//                 :msg-count 252000,
-//                 :msgs-per-op 14.689595},
-//       :valid? true}
-// 5c result after optimizing client offsets, logs, inc offset (5 msg/poll):
-//       :availability {:valid? true, :ok-fraction 0.9995894},
-//       :net {:all {:send-count 169266,
-//             :recv-count 169266,
-//             :msg-count 169266,
-//             :msgs-per-op 9.929372},
-//       :clients {:send-count 43658,
-//                 :recv-count 43658,
-//                 :msg-count 43658},
-//       :servers {:send-count 125608,
-//                 :recv-count 125608,
-//                 :msg-count 125608,
-//                 :msgs-per-op 7.368335},
-//       :valid? true},
-// Same with 10 msg/poll:
-//       :availability {:valid? true, :ok-fraction 0.9995302},
-//       :net {:all {:send-count 152760,
-//             :recv-count 152760,
-//             :msg-count 152760,
-//             :msgs-per-op 8.970579},
-//       :clients {:send-count 42460,
-//                 :recv-count 42460,
-//                 :msg-count 42460},
-//       :servers {:send-count 110300,
-//                 :recv-count 110300,
-//                 :msg-count 110300,
-//                 :msgs-per-op 6.477186},
-//       :valid? true},
 
 const pollMessageCount = 10
 
@@ -204,8 +121,11 @@ func main() {
 		}
 		requestedMessages := make(map[string][][]int)
 		for requestedKey, requestedOffset := range body.Offsets {
-			allMessages, err := s.readLogsIfExists(logPrefix + requestedKey)
+			mu, _ := s.logMutexes.LoadOrStore(requestedKey, &sync.Mutex{})
+			mu.(*sync.Mutex).Lock()
+			allMessages, err := s.readLogMessagesIfExists(requestedKey)
 			if err != nil {
+				mu.(*sync.Mutex).Unlock()
 				return err
 			}
 			// Grab up to `pollMessageCount` logs
@@ -217,6 +137,7 @@ func main() {
 				}
 				messages = append(messages, []int{requestedOffset + i, message})
 			}
+			mu.(*sync.Mutex).Unlock()
 			if len(messages) > 0 {
 				requestedMessages[requestedKey] = messages
 			}
@@ -274,8 +195,11 @@ func main() {
 		if err := json.Unmarshal(msg.Body, &body); err != nil {
 			return err
 		}
-		allOffsets, err := s.readOffsetsIfExists(clientPrefix + msg.Src)
+		mu, _ := s.clientMutexes.LoadOrStore(msg.Src, &sync.Mutex{})
+		mu.(*sync.Mutex).Lock()
+		allOffsets, err := s.readOffsetsIfExists(msg.Src)
 		if err != nil {
+			mu.(*sync.Mutex).Unlock()
 			return err
 		}
 		requestedOffsets := map[string]int{}
@@ -285,6 +209,7 @@ func main() {
 				requestedOffsets[key] = offset
 			}
 		}
+		mu.(*sync.Mutex).Unlock()
 		return n.Reply(msg, map[string]any{"type": "list_committed_offsets_ok", "offsets": requestedOffsets})
 	})
 
@@ -303,76 +228,31 @@ func (s *server) routeNode(key string) (string, error) {
 	return fmt.Sprintf("n%d", sum%len(s.n.NodeIDs())), nil
 }
 
-// Helper function to get key value; returns empty map if value doesn't exist
-func (s *server) readOffsetsIfExists(key string) (map[string]int, error) {
-	m := map[string]int{}
-	err := s.kv.ReadInto(context.Background(), key, &m)
-	if err != nil {
-		rpcErr, ok := errors.AsType[*maelstrom.RPCError](err)
-		if ok && rpcErr.Code == maelstrom.KeyDoesNotExist {
-			return m, nil
-		}
-		return nil, err
-	}
-	return m, nil
-}
-
-// Helper function to get key value; returns empty map if value doesn't exist
-func (s *server) readLogsIfExists(key string) (map[int]int, error) {
-	m := map[int]int{}
-	err := s.kv.ReadInto(context.Background(), key, &m)
-	if err != nil {
-		rpcErr, ok := errors.AsType[*maelstrom.RPCError](err)
-		if ok && rpcErr.Code == maelstrom.KeyDoesNotExist {
-			return m, nil
-		}
-		return nil, err
-	}
-	return m, nil
-}
-
 // Increment offsets + read and write logs from "log-{KEY}"
 func (s *server) handleSend(key string, message int) (int, error) {
-	var err error
 	mu, _ := s.logMutexes.LoadOrStore(key, &sync.Mutex{})
 	mu.(*sync.Mutex).Lock()
 	defer mu.(*sync.Mutex).Unlock()
 
 	// Read previous offset
-	prevOffset, ok := s.logOffsets.Load(key)
-	if !ok { // if not in offsets, fall back to KV
-		prevOffset, err = s.kv.ReadInt(context.Background(), offsetPrefix+key)
-		if err != nil {
-			rpcErr, ok := errors.AsType[*maelstrom.RPCError](err)
-			if ok && rpcErr.Code == maelstrom.KeyDoesNotExist {
-				prevOffset = -1
-			} else {
-				return -1, err
-			}
-		}
-	}
-	messageOffset := prevOffset.(int) + 1
-
-	// Write new offset - should not need CaS since each node has own key
-	s.logOffsets.Store(key, messageOffset)
-	err = s.kv.Write(context.Background(), offsetPrefix+key, messageOffset)
+	prevOffset, err := s.readLogOffsetIfExists(key)
 	if err != nil {
+		return -1, err
+	}
+	messageOffset := prevOffset + 1
+
+	// Write new offset
+	if err = s.writeLogOffset(key, messageOffset); err != nil {
 		return -1, err
 	}
 
 	// Update logs by reading existing and adding new
-	logs, ok := s.logMessages.Load(key)
-	if !ok { // fall back to KV
-		logs, err = s.readLogsIfExists(logPrefix + key)
-		if err != nil {
-			return -1, err
-		}
-	}
-	logMessages := logs.(map[int]int)
-	logMessages[messageOffset] = message
-	s.logMessages.Store(key, logMessages)
-	err = s.kv.Write(context.Background(), logPrefix+key, logMessages)
+	logs, err := s.readLogMessagesIfExists(key)
 	if err != nil {
+		return -1, err
+	}
+	logs[messageOffset] = message
+	if err = s.writeLogMessages(key, logs); err != nil {
 		return -1, err
 	}
 	return messageOffset, nil
@@ -385,16 +265,103 @@ func (s *server) handleCommitOffsets(newOffsets map[string]int, client string) e
 	defer mu.(*sync.Mutex).Unlock()
 
 	// Update offsets for client
-	clientOffsets, err := s.readOffsetsIfExists(clientPrefix + client)
+	clientOffsets, err := s.readOffsetsIfExists(client)
 	if err != nil {
 		return err
 	}
 	for logKey, logOffset := range newOffsets {
 		clientOffsets[logKey] = logOffset
 	}
-	err = s.kv.Write(context.Background(), clientPrefix+client, &clientOffsets)
+	if err = s.writeClientOffsets(client, clientOffsets); err != nil {
+		return err
+	}
+	return nil
+}
+
+// Helper function to get key value; returns -1 if value doesn't exist.
+// Attempts to read from in-memory store and falls back to KV store.
+func (s *server) readLogOffsetIfExists(key string) (int, error) {
+	offset, ok := s.logOffsets.Load(key)
+	if ok {
+		return offset.(int), nil
+	}
+	prevOffset, err := s.kv.ReadInt(context.Background(), offsetPrefix+key)
+	if err != nil {
+		rpcErr, ok := errors.AsType[*maelstrom.RPCError](err)
+		if ok && rpcErr.Code == maelstrom.KeyDoesNotExist {
+			prevOffset = -1
+		} else {
+			return -1, err
+		}
+	}
+	return prevOffset, nil
+}
+
+// Helper function to write key value to both in-memory and KV stores
+func (s *server) writeLogOffset(key string, offset int) error {
+	// should not need CaS since each node has own key
+	err := s.kv.Write(context.Background(), offsetPrefix+key, offset)
 	if err != nil {
 		return err
 	}
+	s.logOffsets.Store(key, offset)
+	return nil
+}
+
+// Helper function to get key value; returns empty map if value doesn't exist
+// Attempts to read from in-memory store and falls back to KV store.
+func (s *server) readLogMessagesIfExists(key string) (map[int]int, error) {
+	logs, ok := s.logMessages.Load(key)
+	if ok {
+		return logs.(map[int]int), nil
+	}
+	m := map[int]int{}
+	err := s.kv.ReadInto(context.Background(), logPrefix+key, &m)
+	if err != nil {
+		rpcErr, ok := errors.AsType[*maelstrom.RPCError](err)
+		if ok && rpcErr.Code == maelstrom.KeyDoesNotExist {
+			return m, nil
+		}
+		return nil, err
+	}
+	return m, nil
+}
+
+// Helper function to write key value to both in-memory and KV stores
+func (s *server) writeLogMessages(key string, messages map[int]int) error {
+	err := s.kv.Write(context.Background(), logPrefix+key, messages)
+	if err != nil {
+		return err
+	}
+	s.logMessages.Store(key, messages)
+	return nil
+}
+
+// Helper function to get key value; returns empty map if value doesn't exist
+// Attempts to read from in-memory store and falls back to KV store.
+func (s *server) readOffsetsIfExists(key string) (map[string]int, error) {
+	offsets, ok := s.clientOffsets.Load(key)
+	if ok {
+		return offsets.(map[string]int), nil
+	}
+	m := map[string]int{}
+	err := s.kv.ReadInto(context.Background(), clientPrefix+key, &m)
+	if err != nil {
+		rpcErr, ok := errors.AsType[*maelstrom.RPCError](err)
+		if ok && rpcErr.Code == maelstrom.KeyDoesNotExist {
+			return m, nil
+		}
+		return nil, err
+	}
+	return m, nil
+}
+
+// Helper function to write key value to both in-memory and KV stores
+func (s *server) writeClientOffsets(key string, offsets map[string]int) error {
+	err := s.kv.Write(context.Background(), clientPrefix+key, offsets)
+	if err != nil {
+		return err
+	}
+	s.clientOffsets.Store(key, offsets)
 	return nil
 }
