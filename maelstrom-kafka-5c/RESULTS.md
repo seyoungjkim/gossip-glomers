@@ -111,7 +111,7 @@
                  :msgs-per-op 4.326091},
        :valid? true},
 ```
-## No explicit offset handling
+## No explicit offset handling - offset from message list length
 ```
 :availability {:valid? true, :ok-fraction 0.9995854},
  :net {:all {:send-count 95144,
@@ -127,3 +127,20 @@
                  :msgs-per-op 3.1464107},
        :valid? true}
 ```
+## Same as above with 20 msgs/poll instead of 10
+```
+:availability {:valid? true, :ok-fraction 0.999584},
+ :net {:all {:send-count 88158,
+             :recv-count 88158,
+             :msg-count 88158,
+             :msgs-per-op 5.23908},
+       :clients {:send-count 41340,
+                 :recv-count 41340,
+                 :msg-count 41340},
+       :servers {:send-count 46818,
+                 :recv-count 46818,
+                 :msg-count 46818,
+                 :msgs-per-op 2.782314},
+       :valid? true},
+```
+Diminishing returns after this point.
