@@ -83,6 +83,7 @@ import (
 //                 :msg-count 110300,
 //                 :msgs-per-op 6.477186},
 //       :valid? true},
+// Then I removed the in-memory offset counter and performance got slightly worse, but that's okay.
 
 const pollMessageCount = 10
 
@@ -140,7 +141,7 @@ func main() {
 		if err != nil {
 			return err
 		}
-		// If current node, send
+		// If current node, handle send
 		if n.ID() == nodeToHandle {
 			offset, err := s.handleSend(body.Key, body.Msg)
 			if err != nil {
@@ -183,26 +184,26 @@ func main() {
 		if err := json.Unmarshal(msg.Body, &body); err != nil {
 			return err
 		}
-		msgs := make(map[string][][]int)
+		requestedMessages := make(map[string][][]int)
 		for requestedKey, requestedOffset := range body.Offsets {
-			requestedLogs, err := s.readLogsIfExists(logPrefix + requestedKey)
+			allMessages, err := s.readLogsIfExists(logPrefix + requestedKey)
 			if err != nil {
 				return err
 			}
-			// Grab up to pollMessageCount logs
-			var logs [][]int
+			// Grab up to `pollMessageCount` logs
+			var messages [][]int
 			for i := 0; i < pollMessageCount; i++ {
-				requestedMessage, ok := requestedLogs[requestedOffset+i]
+				message, ok := allMessages[requestedOffset+i]
 				if !ok {
 					break
 				}
-				logs = append(logs, []int{requestedOffset + i, requestedMessage})
+				messages = append(messages, []int{requestedOffset + i, message})
 			}
-			if len(logs) > 0 {
-				msgs[requestedKey] = logs
+			if len(messages) > 0 {
+				requestedMessages[requestedKey] = messages
 			}
 		}
-		return n.Reply(msg, map[string]any{"type": "poll_ok", "msgs": msgs})
+		return n.Reply(msg, map[string]any{"type": "poll_ok", "msgs": requestedMessages})
 	})
 
 	n.Handle("commit_offsets", func(msg maelstrom.Message) error {
@@ -255,16 +256,33 @@ func main() {
 		if err := json.Unmarshal(msg.Body, &body); err != nil {
 			return err
 		}
-		offsets, err := s.readOffsetsIfExists(clientPrefix + msg.Src)
+		allOffsets, err := s.readOffsetsIfExists(clientPrefix + msg.Src)
 		if err != nil {
 			return err
 		}
-		return n.Reply(msg, map[string]any{"type": "list_committed_offsets_ok", "offsets": offsets})
+		requestedOffsets := map[string]int{}
+		for _, key := range body.Keys {
+			offset, ok := allOffsets[key]
+			if ok {
+				requestedOffsets[key] = offset
+			}
+		}
+		return n.Reply(msg, map[string]any{"type": "list_committed_offsets_ok", "offsets": requestedOffsets})
 	})
 
 	if err := n.Run(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func (s *server) routeNode(key string) (string, error) {
+	hasher := fnv.New32a()
+	_, err := hasher.Write([]byte(key))
+	if err != nil {
+		return "", err
+	}
+	sum := int(hasher.Sum32())
+	return fmt.Sprintf("n%d", sum%len(s.n.NodeIDs())), nil
 }
 
 // Helper function to get key value; returns empty map if value doesn't exist
@@ -295,16 +313,7 @@ func (s *server) readLogsIfExists(key string) (map[int]int, error) {
 	return m, nil
 }
 
-func (s *server) routeNode(key string) (string, error) {
-	hasher := fnv.New32a()
-	_, err := hasher.Write([]byte(key))
-	if err != nil {
-		return "", err
-	}
-	sum := int(hasher.Sum32())
-	return fmt.Sprintf("n%d", sum%len(s.n.NodeIDs())), nil
-}
-
+// Increment offsets + read and write logs from "log-{KEY}"
 func (s *server) handleSend(key string, message int) (int, error) {
 	mu, _ := s.logMutexes.LoadOrStore(key, &sync.Mutex{})
 	mu.(*sync.Mutex).Lock()
@@ -347,6 +356,7 @@ func (s *server) handleCommitOffsets(newOffsets map[string]int, client string) e
 	mu.(*sync.Mutex).Lock()
 	defer mu.(*sync.Mutex).Unlock()
 
+	// Update offsets for client
 	clientOffsets, err := s.readOffsetsIfExists(clientPrefix + client)
 	if err != nil {
 		return err
