@@ -121,7 +121,7 @@ func main() {
 			// Get read lock since we might read from memory
 			mu, _ := s.logMutexes.LoadOrStore(requestedKey, &sync.RWMutex{})
 			mu.(*sync.RWMutex).RLock()
-			allMessages, err := s.readLogMessagesIfExists(requestedKey)
+			allMessages, err := s.readLogMessages(requestedKey)
 			if err != nil {
 				mu.(*sync.RWMutex).RUnlock()
 				return err
@@ -192,7 +192,7 @@ func main() {
 		// Get read lock since we might read from memory
 		mu, _ := s.clientMutexes.LoadOrStore(msg.Src, &sync.RWMutex{})
 		mu.(*sync.RWMutex).RLock()
-		allOffsets, err := s.readOffsetsIfExists(msg.Src)
+		allOffsets, err := s.readClientOffsets(msg.Src)
 		if err != nil {
 			mu.(*sync.RWMutex).RUnlock()
 			return err
@@ -230,7 +230,7 @@ func (s *server) handleSend(key string, message int) (int, error) {
 	defer mu.(*sync.RWMutex).Unlock()
 
 	// Update logs by reading existing and adding new
-	logs, err := s.readLogMessagesIfExists(key)
+	logs, err := s.readLogMessages(key)
 	if err != nil {
 		return -1, err
 	}
@@ -249,7 +249,7 @@ func (s *server) handleCommitOffsets(newOffsets map[string]int, client string) e
 	defer mu.(*sync.RWMutex).Unlock()
 
 	// Update offsets for client
-	clientOffsets, err := s.readOffsetsIfExists(client)
+	clientOffsets, err := s.readClientOffsets(client)
 	if err != nil {
 		return err
 	}
@@ -264,7 +264,7 @@ func (s *server) handleCommitOffsets(newOffsets map[string]int, client string) e
 
 // Helper function to get key value; returns empty slice if value doesn't exist
 // Attempts to read from in-memory store and falls back to KV store.
-func (s *server) readLogMessagesIfExists(key string) ([]int, error) {
+func (s *server) readLogMessages(key string) ([]int, error) {
 	logs, ok := s.logMessages.Load(key)
 	if ok {
 		return logs.([]int), nil
@@ -293,7 +293,7 @@ func (s *server) writeLogMessages(key string, messages []int) error {
 
 // Helper function to get key value; returns empty map if value doesn't exist
 // Attempts to read from in-memory store and falls back to KV store.
-func (s *server) readOffsetsIfExists(key string) (map[string]int, error) {
+func (s *server) readClientOffsets(key string) (map[string]int, error) {
 	offsets, ok := s.clientOffsets.Load(key)
 	if ok {
 		return offsets.(map[string]int), nil
