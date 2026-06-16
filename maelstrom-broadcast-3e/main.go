@@ -54,10 +54,10 @@ func mainImpl() {
 
 		// Update message state
 		if _, ok := seenMessages[message]; ok { // Don't do anything if seen already
-			if msg.Src[0] != 'c' { // Only respond to clients
-				return nil
+			if isFromClient(msg.Src) { // Only respond to clients
+				return n.Reply(msg, map[string]any{"type": "broadcast_ok"})
 			}
-			return n.Reply(msg, map[string]any{"type": "broadcast_ok"})
+			return nil
 		}
 
 		// Add to seen messages and add new message to pending messages queue
@@ -73,10 +73,10 @@ func mainImpl() {
 		}
 
 		// Only respond to clients
-		if msg.Src[0] != 'c' {
-			return nil
+		if isFromClient(msg.Src) {
+			return n.Reply(msg, map[string]any{"type": "broadcast_ok"})
 		}
-		return n.Reply(msg, map[string]any{"type": "broadcast_ok"})
+		return nil
 	})
 
 	// Handles returning seen messages
