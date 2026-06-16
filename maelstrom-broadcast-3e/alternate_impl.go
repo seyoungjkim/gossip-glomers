@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"log"
-	"slices"
 	"sync"
 	"time"
 
@@ -11,36 +10,21 @@ import (
 )
 
 // Run 3e (high efficiency): ./../maelstrom/maelstrom test -w broadcast --bin ~/go/bin/maelstrom-broadcast-3e --node-count 25 --time-limit 20 --rate 100 --latency 100
-//   Goal: Messages-per-operation < 20, Median latency < 1 second, Maximum latency < 2 seconds
 // With partitions: --nemesis partition
 
 // High-level approach: queue up messages to send in bulk only to immediate neighbors
-// Pick an arbitrary leader node. All messages funneled through this leader.
-// Each node will send `broadcast` messages to the leader.
-// Nodes record messages received from `bulk_broadcast` but do not send them on unless they are the leader.
+// Each node will send `broadcast` messages to its neighbors in `bulk_broadcast`
+// Nodes record messages received from `bulk_broadcast` but do not send them on.
 
-const retryBackoff = 100 * time.Millisecond
+const alternateRetryBackoff = 1000 * time.Millisecond
 
-type broadcastMessage struct {
-	Message int64 `json:"message"`
-}
-
-type bulkBroadcastMessage struct {
-	Messages []int64 `json:"messages"`
-}
-
-func main() {
-	mainImpl()
-}
-
-func mainImpl() {
+func alternateImpl() {
 	n := maelstrom.NewNode()
 	var mu sync.Mutex
 	seenMessages := make(map[int64]struct{})
 	pendingMessages := make(map[string]map[int64]struct{})
-	topology := make(map[string][]string)
 
-	// Handle node broadcast message
+	// Handle node broadcast message, which is only received from clients
 	n.Handle("broadcast", func(msg maelstrom.Message) error {
 		// Unmarshal the message body
 		var body broadcastMessage
@@ -52,29 +36,21 @@ func mainImpl() {
 		mu.Lock()
 		defer mu.Unlock()
 
-		// Update message state
+		// Update seen message state
 		if _, ok := seenMessages[message]; ok { // Don't do anything if seen already
-			if msg.Src[0] != 'c' { // Only respond to clients
-				return nil
-			}
 			return n.Reply(msg, map[string]any{"type": "broadcast_ok"})
 		}
-
-		// Add to seen messages and add new message to pending messages queue
 		seenMessages[message] = struct{}{}
-		for _, neighbor := range topology[n.ID()] {
-			if neighbor == msg.Src {
+
+		// Add new message to pending messages queue
+		for _, neighbor := range n.NodeIDs() {
+			if neighbor == n.ID() { // skip self
 				continue
 			}
 			if pendingMessages[neighbor] == nil {
 				pendingMessages[neighbor] = make(map[int64]struct{})
 			}
 			pendingMessages[neighbor][message] = struct{}{}
-		}
-
-		// Only respond to clients
-		if msg.Src[0] != 'c' {
-			return nil
 		}
 		return n.Reply(msg, map[string]any{"type": "broadcast_ok"})
 	})
@@ -92,25 +68,8 @@ func mainImpl() {
 		return n.Reply(msg, body)
 	})
 
-	// Ignore given topology - select a single leader and followers
+	// Ignore given topology - each node will be root of tree
 	n.Handle("topology", func(msg maelstrom.Message) error {
-		var nodes []string
-		for _, node := range n.NodeIDs() {
-			nodes = append(nodes, node)
-		}
-		slices.Sort(nodes)
-		leader := nodes[0]
-		leaderTopology := make(map[string][]string)
-		leaderTopology[leader] = []string{}
-		for _, follower := range nodes[1:] {
-			leaderTopology[leader] = append(leaderTopology[leader], follower)
-			leaderTopology[follower] = []string{leader}
-		}
-
-		// Set the new topology
-		mu.Lock()
-		defer mu.Unlock()
-		topology = leaderTopology
 		return n.Reply(msg, map[string]any{"type": "topology_ok"})
 	})
 
@@ -125,32 +84,16 @@ func mainImpl() {
 		mu.Lock()
 		defer mu.Unlock()
 
+		// Add to seen messages
 		for _, message := range body.Messages {
-			// Don't do anything if seen already
-			if _, ok := seenMessages[message]; ok {
-				continue
-			}
-
-			// Otherwise add to seen messages
 			seenMessages[message] = struct{}{}
-
-			// Add new message to pending messages queue
-			for _, neighbor := range topology[n.ID()] {
-				if neighbor == msg.Src {
-					continue
-				}
-				if pendingMessages[neighbor] == nil {
-					pendingMessages[neighbor] = make(map[int64]struct{})
-				}
-				pendingMessages[neighbor][message] = struct{}{}
-			}
 		}
-		return nil
+		return n.Reply(msg, map[string]any{"type": "bulk_broadcast_ok"})
 	})
 
 	// Background goroutine to send pending messages periodically
 	go func() {
-		ticker := time.NewTicker(retryBackoff)
+		ticker := time.NewTicker(alternateRetryBackoff)
 		for range ticker.C {
 			// Lock: Gather messages to send
 			mu.Lock()
@@ -182,8 +125,4 @@ func mainImpl() {
 	if err := n.Run(); err != nil {
 		log.Fatal(err)
 	}
-}
-
-func isFromClient(src string) bool {
-	return src[0] == 'c'
 }

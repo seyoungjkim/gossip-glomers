@@ -11,6 +11,7 @@ import (
 )
 
 // Run: ./../maelstrom/maelstrom test -w g-counter --bin ~/go/bin/maelstrom-counter --node-count 20 --rate 100 --time-limit 20 --nemesis partition
+// Run: ./../maelstrom/maelstrom test -w pn-counter --bin ~/go/bin/maelstrom-counter --node-count 20 --rate 100 --time-limit 20 --nemesis partition
 
 type addMessage struct {
 	Delta int `json:"delta"`
