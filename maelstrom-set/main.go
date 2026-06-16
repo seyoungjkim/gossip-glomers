@@ -12,7 +12,7 @@ import (
 // Run: ./../maelstrom/maelstrom test -w g-set --bin ~/go/bin/maelstrom-set --node-count 20 --rate 100 --time-limit 20 --nemesis partition
 // High-level approach: Similar to broadcast solution.
 
-const retryBackoff = 100 * time.Millisecond
+const retryBackoff = 50 * time.Millisecond
 
 type addMessage struct {
 	Element any `json:"element"`
@@ -27,6 +27,7 @@ func main() {
 	var mu sync.Mutex
 	seenElements := make(map[any]struct{})
 	pendingElements := make(map[string]map[any]struct{})
+	bulkAdd := make(chan struct{}, 1)
 
 	// Handle node add message, which is only received from clients
 	n.Handle("add", func(msg maelstrom.Message) error {
@@ -57,19 +58,10 @@ func main() {
 			pendingElements[neighbor][elem] = struct{}{}
 		}
 
-		// Now send them
-		for neighbor, elements := range pendingElements {
-			n.RPC(neighbor, map[string]any{"type": "bulk_add", "elements": elements}, func(msg maelstrom.Message) error {
-				mu.Lock()
-				for _, e := range elements {
-					delete(pendingElements[neighbor], e)
-				}
-				if len(pendingElements[neighbor]) == 0 {
-					delete(pendingElements, neighbor)
-				}
-				mu.Unlock()
-				return nil
-			})
+		// Send pending element(s) to neighbors
+		select {
+		case bulkAdd <- struct{}{}:
+		default:
 		}
 
 		return n.Reply(msg, map[string]any{"type": "add_ok"})
@@ -90,7 +82,7 @@ func main() {
 		for _, elem := range body.Elements {
 			seenElements[elem] = struct{}{}
 		}
-		return nil
+		return n.Reply(msg, map[string]any{"type": "bulk_add_ok"})
 	})
 
 	// Handles returning elements
@@ -108,7 +100,13 @@ func main() {
 	// Background goroutine to send pending elements periodically
 	go func() {
 		ticker := time.NewTicker(retryBackoff)
-		for range ticker.C {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+			case <-bulkAdd:
+			}
+
 			// Gather elements to send
 			mu.Lock()
 			toSendRPC := make(map[string][]any)
@@ -123,13 +121,17 @@ func main() {
 			for neighbor, elements := range toSendRPC {
 				n.RPC(neighbor, map[string]any{"type": "bulk_add", "elements": elements}, func(msg maelstrom.Message) error {
 					mu.Lock()
+					defer mu.Unlock()
+
+					if msg.Type() == "error" {
+						return nil
+					}
 					for _, elem := range elements {
 						delete(pendingElements[neighbor], elem)
 					}
 					if len(pendingElements[neighbor]) == 0 {
 						delete(pendingElements, neighbor)
 					}
-					mu.Unlock()
 					return nil
 				})
 			}

@@ -145,7 +145,7 @@ func mainImpl() {
 				pendingMessages[neighbor][message] = struct{}{}
 			}
 		}
-		return nil
+		return n.Reply(msg, map[string]any{"type": "bulk_broadcast_ok"})
 	})
 
 	// Background goroutine to send pending messages periodically
