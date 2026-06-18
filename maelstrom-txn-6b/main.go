@@ -21,7 +21,7 @@ type txnMessage struct {
 type server struct {
 	n  *maelstrom.Node
 	kv map[int]int
-	mu sync.RWMutex
+	mu sync.Mutex
 }
 
 func main() {
@@ -29,7 +29,7 @@ func main() {
 	s := server{
 		n:  n,
 		kv: make(map[int]int),
-		mu: sync.RWMutex{},
+		mu: sync.Mutex{},
 	}
 
 	n.Handle("txn", func(msg maelstrom.Message) error {
@@ -53,28 +53,28 @@ func (s *server) handleTxn(msg maelstrom.Message, isInternal bool) error {
 		return err
 	}
 	var results [][]any
-	var writeTxns [][]any
+	var writes [][]any
 
 	// Maintain lock for the entire transaction
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	for _, txn := range body.Txn {
+	for _, op := range body.Txn {
 		var res []any
-		key := int(txn[1].(float64))
-		if txn[0] == "r" {
-			res = s.handleRead(int(txn[1].(float64)))
-		} else if txn[0] == "w" {
-			val := int(txn[2].(float64))
+		key := int(op[1].(float64))
+		if op[0] == "r" {
+			res = s.handleRead(int(op[1].(float64)))
+		} else if op[0] == "w" {
+			val := int(op[2].(float64))
 			res = s.handleWrite(key, val)
-			writeTxns = append(writeTxns, txn)
+			writes = append(writes, op)
 		}
 		results = append(results, res)
 	}
 	if isInternal {
 		return nil
 	}
-	err = s.sendWrites(writeTxns)
+	err = s.sendWrites(writes)
 	if err != nil {
 		return err
 	}
@@ -94,12 +94,15 @@ func (s *server) handleWrite(key int, val int) []any {
 	return []any{"w", key, val}
 }
 
-func (s *server) sendWrites(writeTxns [][]any) error {
+func (s *server) sendWrites(writes [][]any) error {
+	if len(writes) == 0 {
+		return nil
+	}
 	for _, node := range s.n.NodeIDs() {
 		if s.n.ID() == node {
 			continue
 		}
-		err := s.n.Send(node, map[string]any{"type": "txn_internal", "txn": writeTxns})
+		err := s.n.Send(node, map[string]any{"type": "txn_internal", "txn": writes})
 		if err != nil {
 			return err
 		}
