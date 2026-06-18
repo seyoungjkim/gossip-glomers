@@ -3,7 +3,10 @@ package main
 import (
 	"encoding/json"
 	"log"
+	"reflect"
+	"slices"
 	"sync"
+	"time"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
@@ -17,17 +20,19 @@ import (
 
 const readOp = "r"
 const writeOp = "append"
+const retryBackoff = 10 * time.Millisecond
 
 type txnMessage struct {
 	Txn [][]any `json:"txn"`
 }
 
 type server struct {
-	n        *maelstrom.Node
-	mu       sync.Mutex
-	kv       map[int][]int
-	lockMu   sync.Mutex
-	keyLocks map[int]*keyLock
+	n          *maelstrom.Node
+	mu         sync.Mutex
+	kv         map[int][]int
+	signalSend chan struct{}
+	sendMu     sync.Mutex
+	txnsToSend map[string][][][]any
 }
 
 type txnUpdate struct {
@@ -39,9 +44,12 @@ type txnUpdate struct {
 func main() {
 	n := maelstrom.NewNode()
 	s := server{
-		n:  n,
-		kv: make(map[int][]int),
-		mu: sync.Mutex{},
+		n:          n,
+		kv:         make(map[int][]int),
+		mu:         sync.Mutex{},
+		signalSend: make(chan struct{}, 1),
+		sendMu:     sync.Mutex{},
+		txnsToSend: make(map[string][][][]any),
 	}
 
 	n.Handle("txn", func(msg maelstrom.Message) error {
@@ -51,6 +59,19 @@ func main() {
 	n.Handle("txn_internal", func(msg maelstrom.Message) error {
 		return s.handleTxn(msg, true)
 	})
+
+	// Background goroutine to send pending elements periodically
+	go func() {
+		ticker := time.NewTicker(retryBackoff)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+			case <-s.signalSend:
+			}
+			s.sendWrites()
+		}
+	}()
 
 	if err := n.Run(); err != nil {
 		log.Fatal(err)
@@ -64,20 +85,9 @@ func (s *server) handleTxn(msg maelstrom.Message, isInternal bool) error {
 		return err
 	}
 
-	// Grab the required locks
+	// Update the node's kv store
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	//locks, err := s.getLocks(ops)
-	//if err != nil {
-	//	return s.n.Reply(msg, map[string]any{
-	//		"type": "error",
-	//		"code": 30,
-	//		"text": "The requested transaction has been aborted because of a conflict with another transaction.",
-	//	})
-	//}
-	//defer s.releaseLocks(locks)
-
-	// Update the node's kv store
 	var results [][]any
 	var writes [][]any
 	for _, op := range ops {
@@ -91,15 +101,23 @@ func (s *server) handleTxn(msg maelstrom.Message, isInternal bool) error {
 	}
 
 	if isInternal {
-		return nil
+		return s.n.Reply(msg, map[string]any{"type": "txn_internal_ok"})
 	}
 
-	// Send updates to other nodes
-	// TODO: retry failures
-	err = s.sendWrites(writes)
-	if err != nil {
-		return err
+	// Populate queue and signal sending updates to other nodes
+	s.sendMu.Lock()
+	for _, neighbor := range s.n.NodeIDs() {
+		if neighbor == s.n.ID() { // skip self
+			continue
+		}
+		s.txnsToSend[neighbor] = append(s.txnsToSend[neighbor], writes)
 	}
+	s.sendMu.Unlock()
+	select {
+	case s.signalSend <- struct{}{}:
+	default:
+	}
+
 	return s.n.Reply(msg, map[string]any{"type": "txn_ok", "txn": results})
 }
 
@@ -126,6 +144,7 @@ func (s *server) handleRead(key int) []any {
 	if !ok {
 		return []any{readOp, key, nil}
 	}
+	// TODO: enforce ordering here
 	return []any{readOp, key, val}
 }
 
@@ -134,18 +153,24 @@ func (s *server) handleWrite(key int, val []int) []any {
 	return []any{writeOp, key, val[0]}
 }
 
-func (s *server) sendWrites(writes [][]any) error {
-	if len(writes) == 0 {
-		return nil
-	}
-	for _, node := range s.n.NodeIDs() {
-		if s.n.ID() == node {
-			continue
+func (s *server) sendWrites() {
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+
+	for neighbor, txns := range s.txnsToSend {
+		for _, txn := range txns {
+			s.n.RPC(neighbor, map[string]any{"type": "txn_internal", "txn": txn}, func(msg maelstrom.Message) error {
+				s.sendMu.Lock()
+				defer s.sendMu.Unlock()
+
+				if msg.Type() == "error" {
+					return nil
+				}
+				s.txnsToSend[neighbor] = slices.DeleteFunc(s.txnsToSend[neighbor], func(t [][]any) bool {
+					return reflect.DeepEqual(t, txn)
+				})
+				return nil
+			})
 		}
-		err := s.n.Send(node, map[string]any{"type": "txn_internal", "txn": writes})
-		if err != nil {
-			return err
-		}
 	}
-	return nil
 }
