@@ -36,6 +36,10 @@ func main() {
 		if err := json.Unmarshal(msg.Body, &body); err != nil {
 			return err
 		}
+
+		s.mu.Lock()
+		defer s.mu.Unlock()
+
 		var results [][]any
 		for _, txn := range body.Txn {
 			var res []any
@@ -56,8 +60,6 @@ func main() {
 }
 
 func (s *server) handleRead(key int) []any {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	list, ok := s.kv[key]
 	if !ok {
 		return []any{readOp, key, nil}
@@ -66,8 +68,6 @@ func (s *server) handleRead(key int) []any {
 }
 
 func (s *server) handleWrite(key int, val int) []any {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	_, ok := s.kv[key]
 	if !ok {
 		s.kv[key] = []int{}

@@ -8,27 +8,39 @@ import (
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
 
+// Run single node:
+//   ./../maelstrom/maelstrom test -w txn-list-append --bin ~/go/bin/maelstrom-txn-6b --node-count 1 --time-limit 20 --rate 1000 --concurrency 2n --consistency-models read-uncommitted --availability total
 // Run without partition:
-//   ./../maelstrom/maelstrom test -w txn-rw-register --bin ~/go/bin/maelstrom-txn-6b --node-count 2 --concurrency 2n --time-limit 20 --rate 1000 --consistency-models read-uncommitted
+//   ./../maelstrom/maelstrom test -w txn-list-append --bin ~/go/bin/maelstrom-txn-6b --node-count 2 --concurrency 2n --time-limit 20 --rate 1000 --consistency-models read-uncommitted
 // Run with partition:
-//   ./../maelstrom/maelstrom test -w txn-rw-register --bin ~/go/bin/maelstrom-txn-6b --node-count 2 --concurrency 2n --time-limit 20 --rate 1000 --consistency-models read-uncommitted --availability total --nemesis partition
-// Note: These tests pass without implementing retries. Even 6a passes these tests.
+//   ./../maelstrom/maelstrom test -w txn-list-append --bin ~/go/bin/maelstrom-txn-6b --node-count 2 --concurrency 2n --time-limit 20 --rate 1000 --consistency-models read-uncommitted --availability total --nemesis partition
+
+const readOp = "r"
+const writeOp = "append"
 
 type txnMessage struct {
 	Txn [][]any `json:"txn"`
 }
 
 type server struct {
-	n  *maelstrom.Node
-	kv map[int]int
-	mu sync.Mutex
+	n        *maelstrom.Node
+	mu       sync.Mutex
+	kv       map[int][]int
+	lockMu   sync.Mutex
+	keyLocks map[int]*keyLock
+}
+
+type txnUpdate struct {
+	rw   string
+	key  int
+	list []int
 }
 
 func main() {
 	n := maelstrom.NewNode()
 	s := server{
 		n:  n,
-		kv: make(map[int]int),
+		kv: make(map[int][]int),
 		mu: sync.Mutex{},
 	}
 
@@ -46,34 +58,44 @@ func main() {
 }
 
 func (s *server) handleTxn(msg maelstrom.Message, isInternal bool) error {
-	// Unmarshal the message body
-	var body txnMessage
-	err := json.Unmarshal(msg.Body, &body)
+	// Parse the message into operations
+	ops, err := parseMessage(msg)
 	if err != nil {
 		return err
 	}
-	var results [][]any
-	var writes [][]any
 
-	// Maintain lock for the entire transaction
+	// Grab the required locks
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	//locks, err := s.getLocks(ops)
+	//if err != nil {
+	//	return s.n.Reply(msg, map[string]any{
+	//		"type": "error",
+	//		"code": 30,
+	//		"text": "The requested transaction has been aborted because of a conflict with another transaction.",
+	//	})
+	//}
+	//defer s.releaseLocks(locks)
 
-	for _, op := range body.Txn {
-		var res []any
-		key := int(op[1].(float64))
-		if op[0] == "r" {
-			res = s.handleRead(int(op[1].(float64)))
-		} else if op[0] == "w" {
-			val := int(op[2].(float64))
-			res = s.handleWrite(key, val)
-			writes = append(writes, op)
+	// Update the node's kv store
+	var results [][]any
+	var writes [][]any
+	for _, op := range ops {
+		if op.rw == readOp {
+			results = append(results, s.handleRead(op.key))
+		} else if op.rw == writeOp {
+			res := s.handleWrite(op.key, op.list)
+			results = append(results, res)
+			writes = append(writes, res)
 		}
-		results = append(results, res)
 	}
+
 	if isInternal {
 		return nil
 	}
+
+	// Send updates to other nodes
+	// TODO: retry failures
 	err = s.sendWrites(writes)
 	if err != nil {
 		return err
@@ -81,17 +103,35 @@ func (s *server) handleTxn(msg maelstrom.Message, isInternal bool) error {
 	return s.n.Reply(msg, map[string]any{"type": "txn_ok", "txn": results})
 }
 
+func parseMessage(msg maelstrom.Message) ([]txnUpdate, error) {
+	var body txnMessage
+	err := json.Unmarshal(msg.Body, &body)
+	if err != nil {
+		return nil, err
+	}
+	var ops []txnUpdate
+	for _, op := range body.Txn {
+		key := int(op[1].(float64))
+		if op[0] == readOp {
+			ops = append(ops, txnUpdate{rw: readOp, key: key, list: nil})
+		} else if op[0] == writeOp {
+			ops = append(ops, txnUpdate{rw: writeOp, key: key, list: []int{int(op[2].(float64))}})
+		}
+	}
+	return ops, nil
+}
+
 func (s *server) handleRead(key int) []any {
 	val, ok := s.kv[key]
 	if !ok {
-		return []any{"r", key, nil}
+		return []any{readOp, key, nil}
 	}
-	return []any{"r", key, val}
+	return []any{readOp, key, val}
 }
 
-func (s *server) handleWrite(key int, val int) []any {
-	s.kv[key] = val
-	return []any{"w", key, val}
+func (s *server) handleWrite(key int, val []int) []any {
+	s.kv[key] = append(s.kv[key], val[0])
+	return []any{writeOp, key, val[0]}
 }
 
 func (s *server) sendWrites(writes [][]any) error {

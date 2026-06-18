@@ -1,6 +1,5 @@
 # Notes
-Note: This implementation is buggy because writes are not ordered.
-The maelstrom checker does not work well for this workload, so I will focus on `txn-list-append` instead.
+Note: This implementation is buggy. The maelstrom checker does not work well for this workload, so I will focus on `txn-list-append` instead.
 
 ## Requirements
 ### Prevent G0 (dirty write)
