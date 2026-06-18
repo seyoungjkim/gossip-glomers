@@ -5,12 +5,12 @@ This repo implements the [fly.io distributed systems challenges](https://fly.io/
 * Broadcast
 * G-counter / pn-counter
 * Kafka
-* Txn-rw-register (TODO)
+* Txn-rw-register (buggy implementation done; abandoned in favor of txn-list-append)
 
 It also contains the following additional workloads:
 * G-set
+* Txn-list-append (in-progress)
 * Lin-kv (TODO)
-* Txn-list-append (TODO)
 
 ## go project setup
 ```bash

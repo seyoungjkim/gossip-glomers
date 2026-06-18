@@ -13,11 +13,11 @@ import (
 	"golang.org/x/sync/semaphore"
 )
 
+// TODO: get read uncommitted working
 // Run read uncommitted:
 //   ./../maelstrom/maelstrom test -w txn-list-append --bin ~/go/bin/maelstrom-txn-list --node-count 2 --concurrency 2n --time-limit 20 --rate 1000 --consistency-models read-uncommitted --availability total –-nemesis partition
 // Run read committed:
 //   ./../maelstrom/maelstrom test -w txn-list-append --bin ~/go/bin/maelstrom-txn-list --node-count 2 --concurrency 2n --time-limit 20 --rate 1000 --consistency-models read-committed --availability total –-nemesis partition
-// Note: again, 6b technically does pass this test due to checker issues.
 
 const readOp = "r"
 const writeOp = "append"

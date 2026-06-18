@@ -1,4 +1,7 @@
 # Notes
+Note: This implementation is buggy because writes are not ordered.
+The maelstrom checker does not work well for this workload, so I will focus on `txn-list-append` instead.
+
 ## Requirements
 ### Prevent G0 (dirty write)
 > A cycle of transactions linked by write-write dependencies. For instance, transaction T1 appends 1 to key x, transaction T2 appends 2 to x, and T1 appends 3 to x again, producing the value [1, 2, 3].
