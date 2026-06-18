@@ -117,6 +117,14 @@ func parseMessage(msg maelstrom.Message) ([]txnUpdate, error) {
 }
 
 func (s *server) getKeyLocks(ops []txnUpdate) ([]*sync.Mutex, error) {
+	// This is equivalent to a global lock, and it works, but we want something smarter.
+	// This will give us the error condition for aborted transactions.
+	//
+	// s.lockMu.Lock()
+	// return []*sync.Mutex{s.lockMu}, nil
+	//
+	// TODO: The current implementation can deadlock - make this throw an error.
+
 	s.lockMu.Lock()
 	defer s.lockMu.Unlock()
 
@@ -127,7 +135,6 @@ func (s *server) getKeyLocks(ops []txnUpdate) ([]*sync.Mutex, error) {
 			kl = &sync.Mutex{}
 			s.keyLocks[op.key] = kl
 		}
-		// TODO: risk of deadlock here - address that and throw error
 		kl.Lock()
 		locks = append(locks, kl)
 	}
@@ -143,7 +150,8 @@ func (s *server) handleRead(key int) []any {
 }
 
 func (s *server) handleWrite(key int, val int) []any {
-	// TODO: randomly simulate write failures in order to test aborted internal transactions
+	// At low scale, this in-memory kv store will not fail, but one that writes to disk might.
+	// TODO: randomly simulate write failures in order to test rolling back internal transactions.
 	s.kv[key] = val
 	return []any{"w", key, val}
 }
