@@ -150,8 +150,6 @@ func (s *server) handleRead(key int) []any {
 }
 
 func (s *server) handleWrite(key int, val int) []any {
-	// At low scale, this in-memory kv store will not fail, but one that writes to disk might.
-	// TODO: randomly simulate write failures in order to test rolling back internal transactions.
 	s.kv[key] = val
 	return []any{"w", key, val}
 }
