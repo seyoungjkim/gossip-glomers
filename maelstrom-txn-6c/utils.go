@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"maelstrom-txn-6b"
 	"sort"
 	"time"
 
@@ -16,7 +17,7 @@ type keyLock struct {
 	lock *semaphore.Weighted
 }
 
-func (s *server) getLocks(ops []txnUpdate) ([]*keyLock, error) {
+func (s *maelstrom_txn_6b.server) getLocks(ops []maelstrom_txn_6b.txnUpdate) ([]*keyLock, error) {
 	// The below code is equivalent to a global lock on all keys.
 	//
 	// s.lockMu.Lock()
@@ -65,7 +66,7 @@ func (s *server) getLocks(ops []txnUpdate) ([]*keyLock, error) {
 	return locks, nil
 }
 
-func (s *server) releaseLocks(locks []*keyLock) {
+func (s *maelstrom_txn_6b.server) releaseLocks(locks []*keyLock) {
 	for _, kl := range locks {
 		kl.lock.Release(1)
 	}

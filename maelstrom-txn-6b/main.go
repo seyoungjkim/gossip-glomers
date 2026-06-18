@@ -1,9 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log"
-	"reflect"
 	"slices"
 	"sync"
 	"time"
@@ -20,10 +20,12 @@ import (
 
 const readOp = "r"
 const writeOp = "append"
-const retryBackoff = 10 * time.Millisecond
+const retryBackoff = 100 * time.Millisecond
+const retryTimeout = 10 * time.Millisecond
 
 type txnMessage struct {
 	Txn [][]any `json:"txn"`
+	Id  string  `json:"id"`
 }
 
 type server struct {
@@ -32,7 +34,12 @@ type server struct {
 	kv         map[int][]int
 	signalSend chan struct{}
 	sendMu     sync.Mutex
-	txnsToSend map[string][][][]any
+	txnsToSend map[string][]transaction
+}
+
+type transaction struct {
+	ops []txnUpdate
+	id  string
 }
 
 type txnUpdate struct {
@@ -49,7 +56,7 @@ func main() {
 		mu:         sync.Mutex{},
 		signalSend: make(chan struct{}, 1),
 		sendMu:     sync.Mutex{},
-		txnsToSend: make(map[string][][][]any),
+		txnsToSend: make(map[string][]transaction),
 	}
 
 	n.Handle("txn", func(msg maelstrom.Message) error {
@@ -85,6 +92,9 @@ func (s *server) handleTxn(msg maelstrom.Message, isInternal bool) error {
 		return err
 	}
 
+	// TODO: generate unique ordered ID
+	id := "test id for now"
+
 	// Update the node's kv store
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -94,7 +104,7 @@ func (s *server) handleTxn(msg maelstrom.Message, isInternal bool) error {
 		if op.rw == readOp {
 			results = append(results, s.handleRead(op.key))
 		} else if op.rw == writeOp {
-			res := s.handleWrite(op.key, op.list)
+			res := s.handleWrite(id, op.key, op.list)
 			results = append(results, res)
 			writes = append(writes, res)
 		}
@@ -110,7 +120,8 @@ func (s *server) handleTxn(msg maelstrom.Message, isInternal bool) error {
 		if neighbor == s.n.ID() { // skip self
 			continue
 		}
-		s.txnsToSend[neighbor] = append(s.txnsToSend[neighbor], writes)
+		// TODO: update id
+		s.txnsToSend[neighbor] = append(s.txnsToSend[neighbor], transaction{ops: ops, id: id})
 	}
 	s.sendMu.Unlock()
 	select {
@@ -144,11 +155,11 @@ func (s *server) handleRead(key int) []any {
 	if !ok {
 		return []any{readOp, key, nil}
 	}
-	// TODO: enforce ordering here
 	return []any{readOp, key, val}
 }
 
-func (s *server) handleWrite(key int, val []int) []any {
+func (s *server) handleWrite(id string, key int, val []int) []any {
+	// TODO: enforce ordering here with id
 	s.kv[key] = append(s.kv[key], val[0])
 	return []any{writeOp, key, val[0]}
 }
@@ -157,20 +168,28 @@ func (s *server) sendWrites() {
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
 
+	// Update to remove sendMu from everything
+
 	for neighbor, txns := range s.txnsToSend {
 		for _, txn := range txns {
-			s.n.RPC(neighbor, map[string]any{"type": "txn_internal", "txn": txn}, func(msg maelstrom.Message) error {
-				s.sendMu.Lock()
-				defer s.sendMu.Unlock()
-
-				if msg.Type() == "error" {
-					return nil
-				}
-				s.txnsToSend[neighbor] = slices.DeleteFunc(s.txnsToSend[neighbor], func(t [][]any) bool {
-					return reflect.DeepEqual(t, txn)
-				})
-				return nil
-			})
+			s.sendWrite(neighbor, txn)
 		}
 	}
+}
+
+func (s *server) sendWrite(neighbor string, txn transaction) {
+	ctx, cancel := context.WithTimeout(context.Background(), retryTimeout)
+	defer cancel()
+
+	// TODO fix formatting
+	formattedTxn := txn
+	msg, err := s.n.SyncRPC(ctx, neighbor, map[string]any{"type": "txn_internal", "txn": formattedTxn})
+	if err != nil || msg.Type() == "error" {
+		return
+	}
+	s.sendMu.Lock()
+	s.txnsToSend[neighbor] = slices.DeleteFunc(s.txnsToSend[neighbor], func(t transaction) bool {
+		return t.id == txn.id
+	})
+	s.sendMu.Unlock()
 }

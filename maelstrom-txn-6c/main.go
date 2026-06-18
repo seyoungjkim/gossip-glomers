@@ -1,55 +1,55 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
 	"log"
-	"sort"
 	"sync"
 	"time"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
-	"golang.org/x/sync/semaphore"
 )
 
+// Run single node:
+//   ./../maelstrom/maelstrom test -w txn-list-append --bin ~/go/bin/maelstrom-txn-6b --node-count 1 --time-limit 20 --rate 1000 --concurrency 2n --consistency-models read-uncommitted --availability total
+// Run without partition:
+//   ./../maelstrom/maelstrom test -w txn-list-append --bin ~/go/bin/maelstrom-txn-6b --node-count 2 --concurrency 2n --time-limit 20 --rate 1000 --consistency-models read-uncommitted
 // Run with partition:
-//   ./../maelstrom/maelstrom test -w txn-rw-register --bin ~/go/bin/maelstrom-txn-6c --node-count 2 --concurrency 2n --time-limit 20 --rate 1000 --consistency-models read-committed --availability total –-nemesis partition
-// Note: again, 6b technically does pass this test due to checker issues.
+//   ./../maelstrom/maelstrom test -w txn-list-append --bin ~/go/bin/maelstrom-txn-6b --node-count 2 --concurrency 2n --time-limit 20 --rate 1000 --consistency-models read-uncommitted --availability total --nemesis partition
 
-const lockTimeout = 10 * time.Millisecond
-
-type keyLock struct {
-	key  int
-	lock *semaphore.Weighted
-}
+const readOp = "r"
+const writeOp = "append"
+const retryBackoff = 10 * time.Millisecond
 
 type txnMessage struct {
 	Txn [][]any `json:"txn"`
 }
 
 type server struct {
-	n        *maelstrom.Node
-	kvMu     sync.Mutex
-	kv       map[int]int
-	lockMu   sync.Mutex
-	keyLocks map[int]*keyLock
+	n          *maelstrom.Node
+	mu         sync.Mutex
+	kv         map[int][]int
+	send       chan struct{}
+	txnsToSend map[int][]any
+	txnMu      sync.Mutex
+	lockMu     sync.Mutex
+	keyLocks   map[int]*keyLock
 }
 
 type txnUpdate struct {
-	rw  string
-	key int
-	val int
+	rw   string
+	key  int
+	list []int
 }
 
 func main() {
 	n := maelstrom.NewNode()
 	s := server{
-		n:        n,
-		kvMu:     sync.Mutex{},
-		kv:       make(map[int]int),
-		lockMu:   sync.Mutex{},
-		keyLocks: make(map[int]*keyLock),
+		n:          n,
+		kv:         make(map[int][]int),
+		mu:         sync.Mutex{},
+		send:       make(chan struct{}, 1),
+		txnsToSend: make(map[int][]any),
+		txnMu:      sync.Mutex{},
 	}
 
 	n.Handle("txn", func(msg maelstrom.Message) error {
@@ -59,6 +59,47 @@ func main() {
 	n.Handle("txn_internal", func(msg maelstrom.Message) error {
 		return s.handleTxn(msg, true)
 	})
+
+	// Background goroutine to send pending elements periodically
+	go func() {
+		ticker := time.NewTicker(retryBackoff)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+			case <-s.send:
+			}
+
+			// Gather elements to send
+			s.txnMu.Lock()
+			toSendRPC := make(map[int][]any)
+			for neighbor, txn := range txnsToSend {
+				for elem := range elements {
+					toSendRPC[neighbor] = append(toSendRPC[neighbor], elem)
+				}
+			}
+			s.txnMu.Unlock()
+
+			// Now send them
+			for neighbor, elements := range toSendRPC {
+				n.RPC(neighbor, map[string]any{"type": "bulk_add", "elements": elements}, func(msg maelstrom.Message) error {
+					mu.Lock()
+					defer mu.Unlock()
+
+					if msg.Type() == "error" {
+						return nil
+					}
+					for _, elem := range elements {
+						delete(pendingElements[neighbor], elem)
+					}
+					if len(pendingElements[neighbor]) == 0 {
+						delete(pendingElements, neighbor)
+					}
+					return nil
+				})
+			}
+		}
+	}()
 
 	if err := n.Run(); err != nil {
 		log.Fatal(err)
@@ -73,39 +114,41 @@ func (s *server) handleTxn(msg maelstrom.Message, isInternal bool) error {
 	}
 
 	// Grab the required locks
-	locks, err := s.getLocks(ops)
-	if err != nil {
-		return s.n.Reply(msg, map[string]any{
-			"type": "error",
-			"code": 30,
-			"text": "The requested transaction has been aborted because of a conflict with another transaction.",
-		})
-	}
-	defer s.releaseLocks(locks)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	//locks, err := s.getLocks(ops)
+	//if err != nil {
+	//	return s.n.Reply(msg, map[string]any{
+	//		"type": "error",
+	//		"code": 30,
+	//		"text": "The requested transaction has been aborted because of a conflict with another transaction.",
+	//	})
+	//}
+	//defer s.releaseLocks(locks)
 
 	// Update the node's kv store
 	var results [][]any
 	var writes [][]any
 	for _, op := range ops {
-		if op.rw == "r" {
+		if op.rw == readOp {
 			results = append(results, s.handleRead(op.key))
-		} else if op.rw == "w" {
-			res := s.handleWrite(op.key, op.val)
+		} else if op.rw == writeOp {
+			res := s.handleWrite(op.key, op.list)
 			results = append(results, res)
 			writes = append(writes, res)
 		}
 	}
 
-	// Send updates to other nodes
 	if isInternal {
 		return nil
 	}
 
-	// TODO: retry failures
-	err = s.sendWrites(writes)
-	if err != nil {
-		return err
+	// Send updates to other nodes
+	select {
+	case s.send <- struct{}{}:
+	default:
 	}
+
 	return s.n.Reply(msg, map[string]any{"type": "txn_ok", "txn": results})
 }
 
@@ -118,86 +161,26 @@ func parseMessage(msg maelstrom.Message) ([]txnUpdate, error) {
 	var ops []txnUpdate
 	for _, op := range body.Txn {
 		key := int(op[1].(float64))
-		if op[0] == "r" {
-			ops = append(ops, txnUpdate{rw: "r", key: key, val: 0})
-		} else if op[0] == "w" {
-			ops = append(ops, txnUpdate{rw: "w", key: key, val: int(op[2].(float64))})
+		if op[0] == readOp {
+			ops = append(ops, txnUpdate{rw: readOp, key: key, list: nil})
+		} else if op[0] == writeOp {
+			ops = append(ops, txnUpdate{rw: writeOp, key: key, list: []int{int(op[2].(float64))}})
 		}
 	}
 	return ops, nil
 }
 
-func (s *server) getLocks(ops []txnUpdate) ([]*keyLock, error) {
-	// The below code is equivalent to a global lock on all keys.
-	//
-	// s.lockMu.Lock()
-	// return []*sync.Mutex{s.lockMu}, nil
-	//
-	// It works, but we want something smarter, so we acquire per-key locks instead.
-
-	var locks []*keyLock
-	seen := make(map[int]struct{})
-
-	// Grab list of locks
-	s.lockMu.Lock()
-	for _, op := range ops {
-		if _, ok := seen[op.key]; ok {
-			continue
-		}
-		seen[op.key] = struct{}{}
-		kl, ok := s.keyLocks[op.key]
-		if !ok {
-			kl = &keyLock{
-				key:  op.key,
-				lock: semaphore.NewWeighted(1),
-			}
-			s.keyLocks[op.key] = kl
-		}
-		locks = append(locks, kl)
-	}
-	s.lockMu.Unlock()
-	sort.Slice(locks, func(i, j int) bool {
-		return locks[i].key < locks[j].key
-	})
-
-	// Try to acquire the locks within the timeout
-	ctx, cancel := context.WithTimeout(context.Background(), lockTimeout)
-	defer cancel()
-	for i, kl := range locks {
-		if err := kl.lock.Acquire(ctx, 1); err != nil {
-			// Release all prior locks
-			for _, pl := range locks[:i] {
-				pl.lock.Release(1)
-			}
-			return nil, errors.New("lock cannot be acquired")
-		}
-	}
-	return locks, nil
-}
-
-func (s *server) releaseLocks(locks []*keyLock) {
-	for _, kl := range locks {
-		kl.lock.Release(1)
-	}
-}
-
 func (s *server) handleRead(key int) []any {
-	s.kvMu.Lock()
-	defer s.kvMu.Unlock()
-
 	val, ok := s.kv[key]
 	if !ok {
-		return []any{"r", key, nil}
+		return []any{readOp, key, nil}
 	}
-	return []any{"r", key, val}
+	return []any{readOp, key, val}
 }
 
-func (s *server) handleWrite(key int, val int) []any {
-	s.kvMu.Lock()
-	defer s.kvMu.Unlock()
-
-	s.kv[key] = val
-	return []any{"w", key, val}
+func (s *server) handleWrite(key int, val []int) []any {
+	s.kv[key] = append(s.kv[key], val[0])
+	return []any{writeOp, key, val[0]}
 }
 
 func (s *server) sendWrites(writes [][]any) error {

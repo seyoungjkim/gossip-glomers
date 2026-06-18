@@ -68,10 +68,6 @@ func (s *server) handleRead(key int) []any {
 }
 
 func (s *server) handleWrite(key int, val int) []any {
-	_, ok := s.kv[key]
-	if !ok {
-		s.kv[key] = []int{}
-	}
 	s.kv[key] = append(s.kv[key], val)
 	return []any{writeOp, key, val}
 }
