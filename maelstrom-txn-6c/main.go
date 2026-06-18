@@ -18,7 +18,7 @@ import (
 //   ./../maelstrom/maelstrom test -w txn-rw-register --bin ~/go/bin/maelstrom-txn-6c --node-count 2 --concurrency 2n --time-limit 20 --rate 1000 --consistency-models read-committed --availability total –-nemesis partition
 // Note: again, 6b technically does pass this test due to checker issues.
 
-const lockTimeout = 50 * time.Millisecond
+const lockTimeout = 10 * time.Millisecond
 
 type keyLock struct {
 	key  int
@@ -146,7 +146,7 @@ func (s *server) getLocks(ops []txnUpdate) ([]*keyLock, error) {
 	// It works, but we want something smarter, so we acquire per-key locks instead.
 
 	var locks []*keyLock
-	var seen map[int]struct{}
+	seen := make(map[int]struct{})
 
 	// Grab list of locks
 	s.lockMu.Lock()
@@ -173,11 +173,12 @@ func (s *server) getLocks(ops []txnUpdate) ([]*keyLock, error) {
 	// Try to acquire the locks within the timeout
 	ctx, cancel := context.WithTimeout(context.Background(), lockTimeout)
 	defer cancel()
-	for i, kl := range s.keyLocks {
-		if err := kl.lock.Acquire(ctx, 1); err == nil {
+	for i, kl := range locks {
+		if err := kl.lock.Acquire(ctx, 1); err != nil {
 			kl.lock.Release(1)
-			for _, l := range locks[:i] {
-				l.lock.Release(1)
+			// Release all prior locks
+			for _, pl := range locks[:i] {
+				pl.lock.Release(1)
 			}
 			return nil, errors.New(fmt.Sprintf("lock for %d already held", kl.key))
 		}
