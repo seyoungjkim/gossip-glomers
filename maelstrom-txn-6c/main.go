@@ -34,8 +34,6 @@ type server struct {
 	kv       map[int]int
 	lockMu   *sync.Mutex
 	keyLocks map[int]*keyLock
-	sendMu   *sync.Mutex
-	toSend   [][][]any
 }
 
 type txnUpdate struct {
@@ -51,8 +49,6 @@ func main() {
 		kv:       make(map[int]int),
 		lockMu:   &sync.Mutex{},
 		keyLocks: make(map[int]*keyLock),
-		sendMu:   &sync.Mutex{},
-		toSend:   [][][]any{},
 	}
 
 	n.Handle("txn", func(msg maelstrom.Message) error {
@@ -76,7 +72,6 @@ func (s *server) handleTxn(msg maelstrom.Message, isInternal bool) error {
 	}
 
 	// Grab the required locks
-	// TODO: if it fails, consider retrying a few times.
 	locks, err := s.getLocks(ops)
 	if err != nil {
 		return s.n.Reply(msg, map[string]any{
@@ -108,12 +103,8 @@ func (s *server) handleTxn(msg maelstrom.Message, isInternal bool) error {
 		return nil
 	}
 
-	// TODO: probably want to retry this as well. Add goroutine.
 	err = s.sendWrites(writes)
 	if err != nil {
-		s.sendMu.Lock()
-		s.toSend = append(s.toSend, writes)
-		s.sendMu.Unlock()
 		return err
 	}
 	return s.n.Reply(msg, map[string]any{"type": "txn_ok", "txn": results})
