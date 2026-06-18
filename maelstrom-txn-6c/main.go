@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"sort"
 	"sync"
@@ -32,7 +31,7 @@ type txnMessage struct {
 type server struct {
 	n        *maelstrom.Node
 	kv       map[int]int
-	lockMu   *sync.Mutex
+	lockMu   sync.Mutex
 	keyLocks map[int]*keyLock
 }
 
@@ -47,7 +46,7 @@ func main() {
 	s := server{
 		n:        n,
 		kv:       make(map[int]int),
-		lockMu:   &sync.Mutex{},
+		lockMu:   sync.Mutex{},
 		keyLocks: make(map[int]*keyLock),
 	}
 
@@ -75,12 +74,12 @@ func (s *server) handleTxn(msg maelstrom.Message, isInternal bool) error {
 	locks, err := s.getLocks(ops)
 	if err != nil {
 		return s.n.Reply(msg, map[string]any{
-			"type":        "error",
-			"in_reply_to": 1,
-			"code":        30,
-			"text":        "The requested transaction has been aborted because of a conflict with another transaction.",
+			"type": "error",
+			"code": 30,
+			"text": "The requested transaction has been aborted because of a conflict with another transaction.",
 		})
 	}
+	defer s.releaseLocks(locks)
 
 	// Update the node's kv store
 	var results [][]any
@@ -90,19 +89,17 @@ func (s *server) handleTxn(msg maelstrom.Message, isInternal bool) error {
 			results = append(results, s.handleRead(op.key))
 		} else if op.rw == "w" {
 			res := s.handleWrite(op.key, op.val)
-			results = append(results, s.handleWrite(op.key, op.val))
+			results = append(results, res)
 			writes = append(writes, res)
 		}
 	}
-
-	// Release locks
-	s.releaseLocks(locks)
 
 	// Send updates to other nodes
 	if isInternal {
 		return nil
 	}
 
+	// TODO: retry failures
 	err = s.sendWrites(writes)
 	if err != nil {
 		return err
@@ -141,7 +138,7 @@ func (s *server) getLocks(ops []txnUpdate) ([]*keyLock, error) {
 
 	// Grab list of locks
 	s.lockMu.Lock()
-	for _, op := range append(ops) {
+	for _, op := range ops {
 		if _, ok := seen[op.key]; ok {
 			continue
 		}
@@ -166,12 +163,11 @@ func (s *server) getLocks(ops []txnUpdate) ([]*keyLock, error) {
 	defer cancel()
 	for i, kl := range locks {
 		if err := kl.lock.Acquire(ctx, 1); err != nil {
-			kl.lock.Release(1)
 			// Release all prior locks
 			for _, pl := range locks[:i] {
 				pl.lock.Release(1)
 			}
-			return nil, errors.New(fmt.Sprintf("lock for %d already held", kl.key))
+			return nil, errors.New("lock cannot be acquired")
 		}
 	}
 	return locks, nil
