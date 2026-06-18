@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log"
 	"sync"
 
@@ -58,8 +60,9 @@ func (s *server) handleTxn(msg maelstrom.Message, isInternal bool) error {
 		return err
 	}
 
-	// Grab the required key locks
-	locks, err := s.getKeyLocks(ops)
+	// Grab the required locks
+	// TODO: if it fails, consider retrying async a few times.
+	locks, err := s.getLocks(ops)
 	if err != nil {
 		return s.n.Reply(msg, map[string]any{
 			"type":        "error",
@@ -82,7 +85,7 @@ func (s *server) handleTxn(msg maelstrom.Message, isInternal bool) error {
 		}
 	}
 
-	// Release key locks
+	// Release locks
 	for _, kl := range locks {
 		kl.Unlock()
 	}
@@ -91,6 +94,8 @@ func (s *server) handleTxn(msg maelstrom.Message, isInternal bool) error {
 	if isInternal {
 		return nil
 	}
+
+	// TODO: probably want to retry this as well.
 	err = s.sendWrites(writes)
 	if err != nil {
 		return err
@@ -116,14 +121,13 @@ func parseMessage(msg maelstrom.Message) ([]txnUpdate, error) {
 	return ops, nil
 }
 
-func (s *server) getKeyLocks(ops []txnUpdate) ([]*sync.Mutex, error) {
-	// This is equivalent to a global lock, and it works, but we want something smarter.
-	// This will give us the error condition for aborted transactions.
+func (s *server) getLocks(ops []txnUpdate) ([]*sync.Mutex, error) {
+	// The below code is equivalent to a global lock on all keys.
 	//
 	// s.lockMu.Lock()
 	// return []*sync.Mutex{s.lockMu}, nil
 	//
-	// TODO: The current implementation can deadlock - make this throw an error.
+	// It works, but we want something smarter, so we acquire per-key locks instead.
 
 	s.lockMu.Lock()
 	defer s.lockMu.Unlock()
@@ -135,7 +139,12 @@ func (s *server) getKeyLocks(ops []txnUpdate) ([]*sync.Mutex, error) {
 			kl = &sync.Mutex{}
 			s.keyLocks[op.key] = kl
 		}
-		kl.Lock()
+		if !kl.TryLock() {
+			for _, l := range locks {
+				l.Unlock()
+			}
+			return nil, errors.New(fmt.Sprintf("lock for %d already held", op.key))
+		}
 		locks = append(locks, kl)
 	}
 	return locks, nil
