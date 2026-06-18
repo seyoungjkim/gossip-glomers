@@ -1,10 +1,14 @@
-# Results
+# Notes
 Goal:
 * Messages-per-operation < 20
 * Median latency < 1 second
 * Maximum latency < 2 seconds
 
-## Single leader node
+## TODO
+* Consider adding leader election algorithm to 3d and 3e.
+
+## Results
+### Single leader node
 Pick one node to be root of tree.
 
 No partition:
@@ -45,7 +49,7 @@ With partition:
 ```
 As expected, this performs very badly under network partition when the leader is down.
 
-## Decentralized broadcast
+### Decentralized broadcast
 Each node is root of its own tree; broadcasts to every node then stops. Implemented in `alternate_impl.go`.
 
 No partition:

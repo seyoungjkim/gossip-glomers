@@ -21,6 +21,3 @@ go mod tidy
 go get github.com/jepsen-io/maelstrom/demo/go
 go install .
 ```
-
-## TODO
-* Consider adding leader election algorithm to 3d and 3e

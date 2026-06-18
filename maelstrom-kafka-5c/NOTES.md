@@ -1,4 +1,6 @@
-## 5b result (1 msg/poll):
+# Notes
+## Results
+### 5b result (1 msg/poll):
       :availability {:valid? true, :ok-fraction 0.99964577},
       :net {:all {:send-count 382318,
             :recv-count 382318,
@@ -12,7 +14,7 @@
                 :msg-count 334148,
                 :msgs-per-op 19.72655},
       :valid? true},
-## 5b result (5 msg/poll)
+### 5b result (5 msg/poll)
       :availability {:valid? true, :ok-fraction 0.9995857},
       :net {:all {:send-count 259414,
             :recv-count 259414,
@@ -26,7 +28,7 @@
                 :msg-count 216226,
                 :msgs-per-op 12.797467},
       :valid? true},
-## 5c result after optimizing client offsets + inc offset (1 msg/poll):
+### 5c result after optimizing client offsets + inc offset (1 msg/poll):
       :availability {:valid? true, :ok-fraction 0.99953276},
       :net {:all {:send-count 261346,
             :recv-count 261346,
@@ -40,7 +42,7 @@
                 :msg-count 213028,
                 :msgs-per-op 12.441771},
       :valid? true},
-## 5c result after optimizing client offsets and trying to optimize logs, no inc offset (1 msg/poll):
+### 5c result after optimizing client offsets and trying to optimize logs, no inc offset (1 msg/poll):
       :net {:all {:send-count 300574,
             :recv-count 300574,
             :msg-count 300574,
@@ -53,7 +55,7 @@
                 :msg-count 252000,
                 :msgs-per-op 14.689595},
       :valid? true}
-## 5c result after optimizing client offsets, logs, inc offset (5 msg/poll):
+### 5c result after optimizing client offsets, logs, inc offset (5 msg/poll):
       :availability {:valid? true, :ok-fraction 0.9995894},
       :net {:all {:send-count 169266,
             :recv-count 169266,
@@ -67,7 +69,7 @@
                 :msg-count 125608,
                 :msgs-per-op 7.368335},
       :valid? true},
-## Same with 10 msg/poll:
+### Same with 10 msg/poll:
       :availability {:valid? true, :ok-fraction 0.9995302},
       :net {:all {:send-count 152760,
             :recv-count 152760,
@@ -81,7 +83,7 @@
                 :msg-count 110300,
                 :msgs-per-op 6.477186},
       :valid? true},
-## Final result (write optimizations):
+### Final result (write optimizations):
 		:availability {:valid? true, :ok-fraction 0.99958193},
 		:net {:all {:send-count 124466,
             :recv-count 124466,
@@ -95,7 +97,7 @@
                 :msg-count 82934,
                 :msgs-per-op 4.9533534},
       :valid? true},
-## Final result (with read optimizations):
+### Final result (with read optimizations):
 ```
 :availability {:valid? true, :ok-fraction 0.99952376},
  :net {:all {:send-count 114696,
@@ -111,7 +113,7 @@
                  :msgs-per-op 4.326091},
        :valid? true},
 ```
-## No explicit offset handling - offset from message list length
+### No explicit offset handling - offset from message list length
 ```
 :availability {:valid? true, :ok-fraction 0.9995854},
  :net {:all {:send-count 95144,
@@ -127,7 +129,7 @@
                  :msgs-per-op 3.1464107},
        :valid? true}
 ```
-## Same as above with 20 msgs/poll instead of 10
+### Same as above with 20 msgs/poll instead of 10
 ```
 :availability {:valid? true, :ok-fraction 0.999584},
  :net {:all {:send-count 88158,
