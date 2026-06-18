@@ -34,6 +34,7 @@ type txnMessage struct {
 
 type server struct {
 	n        *maelstrom.Node
+	kvMu     sync.Mutex
 	kv       map[int][]int
 	lockMu   sync.Mutex
 	keyLocks map[int]*keyLock
@@ -49,6 +50,7 @@ func main() {
 	n := maelstrom.NewNode()
 	s := server{
 		n:        n,
+		kvMu:     sync.Mutex{},
 		kv:       make(map[int][]int),
 		lockMu:   sync.Mutex{},
 		keyLocks: make(map[int]*keyLock),
@@ -166,7 +168,8 @@ func (s *server) getLocks(ops []txnUpdate) ([]*keyLock, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), lockTimeout)
 	defer cancel()
 	for i, kl := range locks {
-		if err := kl.lock.Acquire(ctx, 1); err != nil {
+		err := kl.lock.Acquire(ctx, 1)
+		if err != nil {
 			// Release all prior locks
 			for _, pl := range locks[:i] {
 				pl.lock.Release(1)
@@ -184,6 +187,9 @@ func (s *server) releaseLocks(locks []*keyLock) {
 }
 
 func (s *server) handleRead(key int) []any {
+	s.kvMu.Lock()
+	defer s.kvMu.Unlock()
+
 	val, ok := s.kv[key]
 	if !ok {
 		return []any{readOp, key, nil}
@@ -192,6 +198,9 @@ func (s *server) handleRead(key int) []any {
 }
 
 func (s *server) handleWrite(key int, val []int) []any {
+	s.kvMu.Lock()
+	defer s.kvMu.Unlock()
+
 	s.kv[key] = append(s.kv[key], val[0])
 	return []any{writeOp, key, val[0]}
 }
