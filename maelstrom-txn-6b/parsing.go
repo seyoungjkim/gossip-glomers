@@ -54,9 +54,9 @@ func parseGossipOkMessage(msg maelstrom.Message) (int, error) {
 	return body.ReqClock, nil
 }
 
-func formatGossipMessageBody(clock int, writes []writeElement) map[string]any {
+func formatGossipMessageBody(clock int, writeElems []writeElement) map[string]any {
 	var formattedTxn [][]any
-	for _, op := range writes {
+	for _, op := range writeElems {
 		formattedTxn = append(formattedTxn, []any{op.key, op.lv.clock, op.lv.nodeId, op.lv.index, op.lv.val})
 	}
 	return map[string]any{"type": "gossip", "clock": clock, "writes": formattedTxn}

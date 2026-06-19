@@ -39,7 +39,8 @@ type server struct {
 	kv         map[int][]listVal
 	signalSend chan struct{}
 	sendMu     sync.RWMutex
-	txnsToSend map[string]map[int][]writeElement
+	// TODO: this is a gross data structure. make it nicer to reason about.
+	txnsToSend map[string]sendQueue
 }
 
 type txnOp struct {
@@ -60,6 +61,10 @@ type writeElement struct {
 	lv  listVal
 }
 
+type sendQueue struct {
+	clockMessages map[int][][]writeElement
+}
+
 func main() {
 	n := maelstrom.NewNode()
 	s := server{
@@ -69,7 +74,7 @@ func main() {
 		mu:         sync.Mutex{},
 		signalSend: make(chan struct{}, 1),
 		sendMu:     sync.RWMutex{},
-		txnsToSend: make(map[string]map[int][]writeElement),
+		txnsToSend: initializeTxnsToSend(n.NodeIDs()),
 	}
 
 	n.Handle("txn", func(msg maelstrom.Message) error {
@@ -115,7 +120,7 @@ func (s *server) handleTxn(msg maelstrom.Message) error {
 
 	s.clock++
 	var results [][]any
-	var writes []writeElement
+	var writeElems []writeElement
 	for i, op := range ops {
 		if op.rw == readOp {
 			results = append(results, s.handleRead(op.key))
@@ -129,27 +134,13 @@ func (s *server) handleTxn(msg maelstrom.Message) error {
 			we := writeElement{key: op.key, lv: lv}
 			res := s.handleWrite(we)
 			results = append(results, res)
-			writes = append(writes, we)
+			writeElems = append(writeElems, we)
 		}
 	}
 
 	// Populate queue and signal sending updates to other nodes
-	if len(writes) > 0 {
-		s.sendMu.Lock()
-		for _, neighbor := range s.n.NodeIDs() {
-			if neighbor == s.n.ID() { // skip self
-				continue
-			}
-			if _, ok := s.txnsToSend[neighbor]; !ok {
-				s.txnsToSend[neighbor] = make(map[int][]writeElement)
-			}
-			s.txnsToSend[neighbor][s.clock] = writes
-		}
-		s.sendMu.Unlock()
-	}
-	select {
-	case s.signalSend <- struct{}{}:
-	default:
+	if len(writeElems) > 0 {
+		s.queueAndSignalSend(writeElems)
 	}
 
 	return s.n.Reply(msg, map[string]any{"type": "txn_ok", "txn": results})
@@ -172,7 +163,9 @@ func (s *server) handleGossip(msg maelstrom.Message) error {
 	for _, we := range writeElems {
 		s.handleMerge(we)
 	}
-	// TODO: need to handle sending to even more nodes in case of partition.
+
+	// Populate queue and signal sending updates to other nodes
+	s.queueAndSignalSend(writeElems)
 	return s.n.Reply(msg, map[string]any{"type": "gossip_ok", "req_clock": reqClock})
 }
 
@@ -181,22 +174,6 @@ func (s *server) handleGossipOk(msg maelstrom.Message) error {
 	if err != nil {
 		return err
 	}
-	s.sendMu.Lock()
-	defer s.sendMu.Unlock()
-	delete(s.txnsToSend[msg.Src], reqClock)
+	s.clearSentMessages(msg.Src, reqClock)
 	return nil
-}
-
-func (s *server) sendWrites() {
-	s.sendMu.RLock()
-	defer s.sendMu.RUnlock()
-
-	for neighbor, txn := range s.txnsToSend {
-		for _, write := range txn {
-			s.n.Send(
-				neighbor,
-				formatGossipMessageBody(s.clock, write),
-			)
-		}
-	}
 }
