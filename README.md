@@ -5,7 +5,7 @@ This repo implements the [fly.io distributed systems challenges](https://fly.io/
 * Broadcast
 * G-counter / pn-counter
 * Kafka
-* Txn-rw-register (abandoned in favor of txn-list-append)
+* Txn-rw-register
 
 It also contains the following additional workloads:
 * G-set
@@ -15,10 +15,12 @@ It also contains the following additional workloads:
 
 ## go project setup
 ```bash
+PROJECT_NAME=maelstrom-txn-rw-6a
 mkdir $PROJECT_NAME
 cd $PROJECT_NAME
 go mod init $PROJECT_NAME
 go mod tidy
 go get github.com/jepsen-io/maelstrom/demo/go
 go install .
+cd ..
 ```
