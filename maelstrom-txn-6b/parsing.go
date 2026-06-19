@@ -45,6 +45,15 @@ func parseGossipMessage(msg maelstrom.Message) (int, []writeElement, error) {
 	return body.Clock, elems, nil
 }
 
+func parseGossipOkMessage(msg maelstrom.Message) (int, error) {
+	var body gossipOkMessage
+	err := json.Unmarshal(msg.Body, &body)
+	if err != nil {
+		return 0, err
+	}
+	return body.ReqClock, nil
+}
+
 func formatGossipMessageBody(clock int, writes []writeElement) map[string]any {
 	var formattedTxn [][]any
 	for _, op := range writes {

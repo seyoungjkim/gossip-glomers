@@ -28,6 +28,10 @@ type gossipMessage struct {
 	Writes [][]any `json:"writes"`
 }
 
+type gossipOkMessage struct {
+	ReqClock int `json:"req_clock"`
+}
+
 type server struct {
 	clock      int
 	n          *maelstrom.Node
@@ -35,7 +39,7 @@ type server struct {
 	kv         map[int][]listVal
 	signalSend chan struct{}
 	sendMu     sync.RWMutex
-	txnsToSend map[string][][]writeElement
+	txnsToSend map[string]map[int][]writeElement
 }
 
 type txnOp struct {
@@ -65,7 +69,7 @@ func main() {
 		mu:         sync.Mutex{},
 		signalSend: make(chan struct{}, 1),
 		sendMu:     sync.RWMutex{},
-		txnsToSend: make(map[string][][]writeElement),
+		txnsToSend: make(map[string]map[int][]writeElement),
 	}
 
 	n.Handle("txn", func(msg maelstrom.Message) error {
@@ -77,7 +81,7 @@ func main() {
 	})
 
 	n.Handle("gossip_ok", func(msg maelstrom.Message) error {
-		return s.handleGossipAck(msg)
+		return s.handleGossipOk(msg)
 	})
 
 	// Background goroutine to send pending elements periodically
@@ -136,7 +140,10 @@ func (s *server) handleTxn(msg maelstrom.Message) error {
 			if neighbor == s.n.ID() { // skip self
 				continue
 			}
-			s.txnsToSend[neighbor] = append(s.txnsToSend[neighbor], writes)
+			if _, ok := s.txnsToSend[neighbor]; !ok {
+				s.txnsToSend[neighbor] = make(map[int][]writeElement)
+			}
+			s.txnsToSend[neighbor][s.clock] = writes
 		}
 		s.sendMu.Unlock()
 	}
@@ -165,12 +172,18 @@ func (s *server) handleGossip(msg maelstrom.Message) error {
 	for _, we := range writeElems {
 		s.handleMerge(we)
 	}
-	// TODO: may need to handle sending to even more nodes in case of partition?
-	return s.n.Reply(msg, map[string]any{"type": "gossip_ok"})
+	// TODO: need to handle sending to even more nodes in case of partition.
+	return s.n.Reply(msg, map[string]any{"type": "gossip_ok", "req_clock": reqClock})
 }
 
-// TODO: optimize by removing acked txns
-func (s *server) handleGossipAck(msg maelstrom.Message) error {
+func (s *server) handleGossipOk(msg maelstrom.Message) error {
+	reqClock, err := parseGossipOkMessage(msg)
+	if err != nil {
+		return err
+	}
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+	delete(s.txnsToSend[msg.Src], reqClock)
 	return nil
 }
 
