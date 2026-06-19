@@ -1,10 +1,7 @@
 package main
 
 import (
-	"context"
-	"encoding/json"
 	"log"
-	"slices"
 	"sync"
 	"time"
 
@@ -21,50 +18,66 @@ import (
 const readOp = "r"
 const writeOp = "append"
 const retryBackoff = 100 * time.Millisecond
-const retryTimeout = 10 * time.Millisecond
 
 type txnMessage struct {
 	Txn [][]any `json:"txn"`
-	Id  string  `json:"id"`
+}
+
+type gossipMessage struct {
+	Clock  int     `json:"clock"`
+	Writes [][]any `json:"writes"`
 }
 
 type server struct {
+	clock      int
 	n          *maelstrom.Node
 	mu         sync.Mutex
-	kv         map[int][]int
+	kv         map[int][]listVal
 	signalSend chan struct{}
-	sendMu     sync.Mutex
-	txnsToSend map[string][]transaction
+	sendMu     sync.RWMutex
+	txnsToSend map[string][][]writeElement
 }
 
-type transaction struct {
-	ops []txnUpdate
-	id  string
-}
-
-type txnUpdate struct {
+type txnOp struct {
 	rw   string
 	key  int
 	list []int
+}
+
+type listVal struct {
+	clock  int
+	nodeId int
+	index  int
+	val    int
+}
+
+type writeElement struct {
+	key int
+	lv  listVal
 }
 
 func main() {
 	n := maelstrom.NewNode()
 	s := server{
 		n:          n,
-		kv:         make(map[int][]int),
+		kv:         make(map[int][]listVal),
+		clock:      0,
 		mu:         sync.Mutex{},
 		signalSend: make(chan struct{}, 1),
-		sendMu:     sync.Mutex{},
-		txnsToSend: make(map[string][]transaction),
+		sendMu:     sync.RWMutex{},
+		txnsToSend: make(map[string][][]writeElement),
 	}
 
 	n.Handle("txn", func(msg maelstrom.Message) error {
-		return s.handleTxn(msg, false)
+		return s.handleTxn(msg)
 	})
 
-	n.Handle("txn_internal", func(msg maelstrom.Message) error {
-		return s.handleTxn(msg, true)
+	n.Handle("gossip", func(msg maelstrom.Message) error {
+		return s.handleGossip(msg)
+	})
+
+	n.Handle("gossip_ok", func(msg maelstrom.Message) error {
+		return s.handleGossipAck(msg)
 	})
 
 	// Background goroutine to send pending elements periodically
@@ -85,45 +98,48 @@ func main() {
 	}
 }
 
-func (s *server) handleTxn(msg maelstrom.Message, isInternal bool) error {
+func (s *server) handleTxn(msg maelstrom.Message) error {
 	// Parse the message into operations
-	ops, err := parseMessage(msg)
+	ops, err := parseTxnMessage(msg)
 	if err != nil {
 		return err
 	}
 
-	// TODO: generate unique ordered ID
-	id := "test id for now"
-
 	// Update the node's kv store
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	s.clock++
 	var results [][]any
-	var writes [][]any
-	for _, op := range ops {
+	var writes []writeElement
+	for i, op := range ops {
 		if op.rw == readOp {
 			results = append(results, s.handleRead(op.key))
 		} else if op.rw == writeOp {
-			res := s.handleWrite(id, op.key, op.list)
+			lv := listVal{
+				clock:  s.clock,
+				nodeId: getNodeId(s.n.ID()),
+				index:  i,
+				val:    op.list[0],
+			}
+			we := writeElement{key: op.key, lv: lv}
+			res := s.handleWrite(we)
 			results = append(results, res)
-			writes = append(writes, res)
+			writes = append(writes, we)
 		}
-	}
-
-	if isInternal {
-		return s.n.Reply(msg, map[string]any{"type": "txn_internal_ok"})
 	}
 
 	// Populate queue and signal sending updates to other nodes
-	s.sendMu.Lock()
-	for _, neighbor := range s.n.NodeIDs() {
-		if neighbor == s.n.ID() { // skip self
-			continue
+	if len(writes) > 0 {
+		s.sendMu.Lock()
+		for _, neighbor := range s.n.NodeIDs() {
+			if neighbor == s.n.ID() { // skip self
+				continue
+			}
+			s.txnsToSend[neighbor] = append(s.txnsToSend[neighbor], writes)
 		}
-		// TODO: update id
-		s.txnsToSend[neighbor] = append(s.txnsToSend[neighbor], transaction{ops: ops, id: id})
+		s.sendMu.Unlock()
 	}
-	s.sendMu.Unlock()
 	select {
 	case s.signalSend <- struct{}{}:
 	default:
@@ -132,64 +148,42 @@ func (s *server) handleTxn(msg maelstrom.Message, isInternal bool) error {
 	return s.n.Reply(msg, map[string]any{"type": "txn_ok", "txn": results})
 }
 
-func parseMessage(msg maelstrom.Message) ([]txnUpdate, error) {
-	var body txnMessage
-	err := json.Unmarshal(msg.Body, &body)
+func (s *server) handleGossip(msg maelstrom.Message) error {
+	// Parse the message into operations
+	reqClock, writeElems, err := parseGossipMessage(msg)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	var ops []txnUpdate
-	for _, op := range body.Txn {
-		key := int(op[1].(float64))
-		if op[0] == readOp {
-			ops = append(ops, txnUpdate{rw: readOp, key: key, list: nil})
-		} else if op[0] == writeOp {
-			ops = append(ops, txnUpdate{rw: writeOp, key: key, list: []int{int(op[2].(float64))}})
-		}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.clock = max(s.clock, reqClock)
+	s.clock++
+
+	// Update the node's kv store
+	for _, we := range writeElems {
+		s.handleMerge(we)
 	}
-	return ops, nil
+	// TODO: may need to handle sending to even more nodes in case of partition?
+	return s.n.Reply(msg, map[string]any{"type": "gossip_ok"})
 }
 
-func (s *server) handleRead(key int) []any {
-	val, ok := s.kv[key]
-	if !ok {
-		return []any{readOp, key, nil}
-	}
-	return []any{readOp, key, val}
-}
-
-func (s *server) handleWrite(id string, key int, val []int) []any {
-	// TODO: enforce ordering here with id
-	s.kv[key] = append(s.kv[key], val[0])
-	return []any{writeOp, key, val[0]}
+// TODO: optimize by removing acked txns
+func (s *server) handleGossipAck(msg maelstrom.Message) error {
+	return nil
 }
 
 func (s *server) sendWrites() {
-	s.sendMu.Lock()
-	defer s.sendMu.Unlock()
+	s.sendMu.RLock()
+	defer s.sendMu.RUnlock()
 
-	// Update to remove sendMu from everything
-
-	for neighbor, txns := range s.txnsToSend {
-		for _, txn := range txns {
-			s.sendWrite(neighbor, txn)
+	for neighbor, txn := range s.txnsToSend {
+		for _, write := range txn {
+			s.n.Send(
+				neighbor,
+				formatGossipMessageBody(s.clock, write),
+			)
 		}
 	}
-}
-
-func (s *server) sendWrite(neighbor string, txn transaction) {
-	ctx, cancel := context.WithTimeout(context.Background(), retryTimeout)
-	defer cancel()
-
-	// TODO fix formatting
-	formattedTxn := txn
-	msg, err := s.n.SyncRPC(ctx, neighbor, map[string]any{"type": "txn_internal", "txn": formattedTxn})
-	if err != nil || msg.Type() == "error" {
-		return
-	}
-	s.sendMu.Lock()
-	s.txnsToSend[neighbor] = slices.DeleteFunc(s.txnsToSend[neighbor], func(t transaction) bool {
-		return t.id == txn.id
-	})
-	s.sendMu.Unlock()
 }
