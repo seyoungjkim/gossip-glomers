@@ -25,11 +25,11 @@ func parseTxnMessage(msg maelstrom.Message) ([]txnOp, error) {
 	return ops, nil
 }
 
-func parseGossipMessage(msg maelstrom.Message) (int, []writeElement, error) {
+func parseGossipMessage(msg maelstrom.Message) (string, writeTxn, error) {
 	var body gossipMessage
 	err := json.Unmarshal(msg.Body, &body)
 	if err != nil {
-		return -1, nil, err
+		return "", writeTxn{}, err
 	}
 	var elems []writeElement
 	for _, e := range body.Writes {
@@ -42,24 +42,24 @@ func parseGossipMessage(msg maelstrom.Message) (int, []writeElement, error) {
 				val:    int(e[4].(float64)),
 			}})
 	}
-	return body.Clock, elems, nil
+	return body.Id, writeTxn{clock: body.Clock, writes: elems}, nil
 }
 
-func parseGossipOkMessage(msg maelstrom.Message) (int, error) {
+func parseGossipOkMessage(msg maelstrom.Message) (string, int, error) {
 	var body gossipOkMessage
 	err := json.Unmarshal(msg.Body, &body)
 	if err != nil {
-		return 0, err
+		return "", 0, err
 	}
-	return body.ReqClock, nil
+	return body.Id, body.ReqClock, nil
 }
 
-func formatGossipMessageBody(clock int, writeElems []writeElement) map[string]any {
+func formatGossipMessageBody(id string, txn writeTxn) map[string]any {
 	var formattedTxn [][]any
-	for _, op := range writeElems {
+	for _, op := range txn.writes {
 		formattedTxn = append(formattedTxn, []any{op.key, op.lv.clock, op.lv.nodeId, op.lv.index, op.lv.val})
 	}
-	return map[string]any{"type": "gossip", "clock": clock, "writes": formattedTxn}
+	return map[string]any{"type": "gossip", "id": id, "writes": formattedTxn}
 }
 
 func formatList(list []listVal) []int {

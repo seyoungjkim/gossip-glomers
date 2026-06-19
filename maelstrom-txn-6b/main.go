@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -24,12 +25,14 @@ type txnMessage struct {
 }
 
 type gossipMessage struct {
+	Id     string  `json:"id"`
 	Clock  int     `json:"clock"`
 	Writes [][]any `json:"writes"`
 }
 
 type gossipOkMessage struct {
-	ReqClock int `json:"req_clock"`
+	Id       string `json:"id"`
+	ReqClock int    `json:"req_clock"`
 }
 
 type server struct {
@@ -39,8 +42,7 @@ type server struct {
 	kv         map[int][]listVal
 	signalSend chan struct{}
 	sendMu     sync.RWMutex
-	// TODO: this is a gross data structure. make it nicer to reason about.
-	txnsToSend map[string]sendQueue
+	txnsToSend map[string]map[string]writeTxn
 }
 
 type txnOp struct {
@@ -56,13 +58,14 @@ type listVal struct {
 	val    int
 }
 
+type writeTxn struct {
+	clock  int
+	writes []writeElement
+}
+
 type writeElement struct {
 	key int
 	lv  listVal
-}
-
-type sendQueue struct {
-	clockMessages map[int][][]writeElement
 }
 
 func main() {
@@ -74,7 +77,7 @@ func main() {
 		mu:         sync.Mutex{},
 		signalSend: make(chan struct{}, 1),
 		sendMu:     sync.RWMutex{},
-		txnsToSend: initializeTxnsToSend(n.NodeIDs()),
+		txnsToSend: make(map[string]map[string]writeTxn),
 	}
 
 	n.Handle("txn", func(msg maelstrom.Message) error {
@@ -118,7 +121,10 @@ func (s *server) handleTxn(msg maelstrom.Message) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Increment clock
 	s.clock++
+
+	// Execute transaction
 	var results [][]any
 	var writeElems []writeElement
 	for i, op := range ops {
@@ -140,15 +146,15 @@ func (s *server) handleTxn(msg maelstrom.Message) error {
 
 	// Populate queue and signal sending updates to other nodes
 	if len(writeElems) > 0 {
-		s.queueAndSignalSend(writeElems)
+		s.queueAndSignalSend(fmt.Sprintf("%d-%s", s.clock, s.n.ID()), s.clock, writeElems)
 	}
 
 	return s.n.Reply(msg, map[string]any{"type": "txn_ok", "txn": results})
 }
 
 func (s *server) handleGossip(msg maelstrom.Message) error {
-	// Parse the message into operations
-	reqClock, writeElems, err := parseGossipMessage(msg)
+	// Parse the message into writes
+	id, txn, err := parseGossipMessage(msg)
 	if err != nil {
 		return err
 	}
@@ -156,24 +162,28 @@ func (s *server) handleGossip(msg maelstrom.Message) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.clock = max(s.clock, reqClock)
-	s.clock++
-
 	// Update the node's kv store
-	for _, we := range writeElems {
+	for _, we := range txn.writes {
 		s.handleMerge(we)
 	}
 
 	// Populate queue and signal sending updates to other nodes
-	s.queueAndSignalSend(writeElems)
-	return s.n.Reply(msg, map[string]any{"type": "gossip_ok", "req_clock": reqClock})
+	s.queueAndSignalSend(id, txn.clock, txn.writes)
+	return s.n.Reply(msg, map[string]any{"type": "gossip_ok", "id": id, "req_clock": txn.clock})
 }
 
 func (s *server) handleGossipOk(msg maelstrom.Message) error {
-	reqClock, err := parseGossipOkMessage(msg)
+	id, reqClock, err := parseGossipOkMessage(msg)
 	if err != nil {
 		return err
 	}
-	s.clearSentMessages(msg.Src, reqClock)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Increment clock
+	s.clock = max(s.clock, reqClock) + 1
+
+	// Clear sent messages
+	s.clearSentMessages(msg.Src, id)
 	return nil
 }

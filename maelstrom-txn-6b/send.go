@@ -1,14 +1,6 @@
 package main
 
-func initializeTxnsToSend(neighbors []string) map[string]sendQueue {
-	txnsToSend := make(map[string]sendQueue)
-	for _, neighbor := range neighbors {
-		txnsToSend[neighbor] = sendQueue{clockMessages: make(map[int][][]writeElement)}
-	}
-	return txnsToSend
-}
-
-func (s *server) queueAndSignalSend(writeElems []writeElement) {
+func (s *server) queueAndSignalSend(id string, clock int, writeElems []writeElement) {
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
 
@@ -16,8 +8,13 @@ func (s *server) queueAndSignalSend(writeElems []writeElement) {
 		if neighbor == s.n.ID() { // skip self
 			continue
 		}
-		sq := s.txnsToSend[neighbor].clockMessages[s.clock]
-		sq = append(sq, writeElems)
+		if _, ok := s.txnsToSend[neighbor]; !ok {
+			s.txnsToSend[neighbor] = make(map[string]writeTxn)
+		}
+		s.txnsToSend[neighbor][id] = writeTxn{
+			clock:  clock,
+			writes: writeElems,
+		}
 	}
 
 	select {
@@ -26,15 +23,11 @@ func (s *server) queueAndSignalSend(writeElems []writeElement) {
 	}
 }
 
-func (s *server) clearSentMessages(neighbor string, clock int) {
+func (s *server) clearSentMessages(neighbor string, id string) {
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
 
-	for c := range s.txnsToSend[neighbor].clockMessages {
-		if c < clock {
-			delete(s.txnsToSend[neighbor].clockMessages, c)
-		}
-	}
+	delete(s.txnsToSend[neighbor], id)
 }
 
 func (s *server) sendWrites() {
@@ -42,13 +35,11 @@ func (s *server) sendWrites() {
 	defer s.sendMu.RUnlock()
 
 	for neighbor, sq := range s.txnsToSend {
-		for clock, txns := range sq.clockMessages {
-			for _, txn := range txns {
-				s.n.Send(
-					neighbor,
-					formatGossipMessageBody(clock, txn),
-				)
-			}
+		for id, txn := range sq {
+			s.n.Send(
+				neighbor,
+				formatGossipMessageBody(id, txn),
+			)
 		}
 	}
 }
