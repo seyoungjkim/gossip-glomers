@@ -6,11 +6,12 @@ This repo implements the [fly.io distributed systems challenges](https://fly.io/
 * G-counter / pn-counter
 * Kafka
 * Txn-rw-register
+  * Note: the check for this workload is buggy, so I abandoned it to work on txn-list-append. Do not assume this is correct.
 
 It also contains the following additional workloads:
 * G-set
 * Txn-list-append (in-progress)
-  * Totally-available read-uncommitted and read-committed
+  * Totally-available, read-uncommitted and read-committed
 * Lin-kv (TODO)
 
 ## go project setup

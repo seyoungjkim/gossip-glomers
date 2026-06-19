@@ -8,7 +8,7 @@ import (
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
 
-// Run: ./../maelstrom/maelstrom test -w txn-list-append --bin ~/go/bin/maelstrom-txn-6a --node-count 1 --time-limit 20 --rate 1000 --concurrency 2n --consistency-models read-uncommitted --availability total
+// Run: ./../maelstrom/maelstrom test -w txn-list-append --bin ~/go/bin/maelstrom-txn-list-6a --node-count 1 --time-limit 20 --rate 1000 --concurrency 2n --consistency-models read-uncommitted --availability total
 
 const readOp = "r"
 const writeOp = "append"

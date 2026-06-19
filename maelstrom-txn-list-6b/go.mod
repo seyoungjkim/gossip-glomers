@@ -1,4 +1,4 @@
-module maelstrom-txn-6b
+module maelstrom-txn-list-6b
 
 go 1.26.3
 
