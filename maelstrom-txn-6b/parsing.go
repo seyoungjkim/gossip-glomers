@@ -45,13 +45,13 @@ func parseGossipMessage(msg maelstrom.Message) (string, writeTxn, error) {
 	return body.Id, writeTxn{clock: body.Clock, writes: elems}, nil
 }
 
-func parseGossipOkMessage(msg maelstrom.Message) (string, int, error) {
+func parseGossipOkMessage(msg maelstrom.Message) (string, error) {
 	var body gossipOkMessage
 	err := json.Unmarshal(msg.Body, &body)
 	if err != nil {
-		return "", 0, err
+		return "", err
 	}
-	return body.Id, body.ReqClock, nil
+	return body.Id, nil
 }
 
 func formatGossipMessageBody(id string, txn writeTxn) map[string]any {
@@ -59,7 +59,7 @@ func formatGossipMessageBody(id string, txn writeTxn) map[string]any {
 	for _, op := range txn.writes {
 		formattedTxn = append(formattedTxn, []any{op.key, op.lv.clock, op.lv.nodeId, op.lv.index, op.lv.val})
 	}
-	return map[string]any{"type": "gossip", "id": id, "writes": formattedTxn}
+	return map[string]any{"type": "gossip", "id": id, "clock": txn.clock, "writes": formattedTxn}
 }
 
 func formatList(list []listVal) []int {

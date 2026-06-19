@@ -1,11 +1,11 @@
 package main
 
-func (s *server) queueAndSignalSend(id string, clock int, writeElems []writeElement) {
+func (s *server) queueAndSignalSend(src string, id string, clock int, writeElems []writeElement) {
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
 
 	for _, neighbor := range s.n.NodeIDs() {
-		if neighbor == s.n.ID() { // skip self
+		if neighbor == s.n.ID() || neighbor == src { // skip self and source
 			continue
 		}
 		if _, ok := s.txnsToSend[neighbor]; !ok {
@@ -30,9 +30,10 @@ func (s *server) clearSentMessages(neighbor string, id string) {
 	delete(s.txnsToSend[neighbor], id)
 }
 
+// TODO: optimize so we don't hold lock during send?
 func (s *server) sendWrites() {
-	s.sendMu.RLock()
-	defer s.sendMu.RUnlock()
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
 
 	for neighbor, sq := range s.txnsToSend {
 		for id, txn := range sq {

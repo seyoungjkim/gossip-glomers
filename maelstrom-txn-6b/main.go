@@ -31,8 +31,7 @@ type gossipMessage struct {
 }
 
 type gossipOkMessage struct {
-	Id       string `json:"id"`
-	ReqClock int    `json:"req_clock"`
+	Id string `json:"id"`
 }
 
 type server struct {
@@ -126,7 +125,7 @@ func (s *server) handleTxn(msg maelstrom.Message) error {
 
 	// Execute transaction
 	var results [][]any
-	var writeElems []writeElement
+	var writes []writeElement
 	for i, op := range ops {
 		if op.rw == readOp {
 			results = append(results, s.handleRead(op.key))
@@ -140,13 +139,14 @@ func (s *server) handleTxn(msg maelstrom.Message) error {
 			we := writeElement{key: op.key, lv: lv}
 			res := s.handleWrite(we)
 			results = append(results, res)
-			writeElems = append(writeElems, we)
+			writes = append(writes, we)
 		}
 	}
 
 	// Populate queue and signal sending updates to other nodes
-	if len(writeElems) > 0 {
-		s.queueAndSignalSend(fmt.Sprintf("%d-%s", s.clock, s.n.ID()), s.clock, writeElems)
+	if len(writes) > 0 {
+		id := fmt.Sprintf("%s-%d", s.n.ID(), s.clock)
+		s.queueAndSignalSend(msg.Src, id, s.clock, writes)
 	}
 
 	return s.n.Reply(msg, map[string]any{"type": "txn_ok", "txn": results})
@@ -162,26 +162,26 @@ func (s *server) handleGossip(msg maelstrom.Message) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Increment the clock
+	s.clock = max(s.clock, txn.clock) + 1
+
 	// Update the node's kv store
 	for _, we := range txn.writes {
 		s.handleMerge(we)
 	}
 
 	// Populate queue and signal sending updates to other nodes
-	s.queueAndSignalSend(id, txn.clock, txn.writes)
-	return s.n.Reply(msg, map[string]any{"type": "gossip_ok", "id": id, "req_clock": txn.clock})
+	s.queueAndSignalSend(msg.Src, id, txn.clock, txn.writes)
+	return s.n.Reply(msg, map[string]any{"type": "gossip_ok", "id": id})
 }
 
 func (s *server) handleGossipOk(msg maelstrom.Message) error {
-	id, reqClock, err := parseGossipOkMessage(msg)
+	id, err := parseGossipOkMessage(msg)
 	if err != nil {
 		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	// Increment clock
-	s.clock = max(s.clock, reqClock) + 1
 
 	// Clear sent messages
 	s.clearSentMessages(msg.Src, id)
