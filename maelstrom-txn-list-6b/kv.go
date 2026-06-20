@@ -1,6 +1,9 @@
 package main
 
-import "slices"
+import (
+	"maps"
+	"slices"
+)
 
 // TODO: improve efficiency of writes
 // O(n)
@@ -9,7 +12,12 @@ func (s *server) handleRead(key int) []any {
 	if !ok {
 		return []any{readOp, key, nil}
 	}
-	return []any{readOp, key, formatList(list)}
+	// maelstrom will get detect a G0 cycle if we return writes that might be re-ordered later.
+	maxClock := 0
+	if len(s.neighborClocks) > 0 {
+		maxClock = slices.Min(slices.Collect(maps.Values(s.neighborClocks)))
+	}
+	return []any{readOp, key, formatList(maxClock, list)}
 }
 
 // O(nlogn)

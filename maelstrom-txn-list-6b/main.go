@@ -31,17 +31,19 @@ type gossipMessage struct {
 }
 
 type gossipOkMessage struct {
-	Id string `json:"id"`
+	Id    string `json:"id"`
+	Clock int    `json:"clock"`
 }
 
 type server struct {
-	clock      int
-	n          *maelstrom.Node
-	mu         sync.Mutex
-	kv         map[int][]listVal
-	signalSend chan struct{}
-	sendMu     sync.RWMutex
-	txnsToSend map[string]map[string]writeTxn
+	clock          int
+	n              *maelstrom.Node
+	mu             sync.Mutex
+	kv             map[int][]listVal
+	signalSend     chan struct{}
+	sendMu         sync.RWMutex
+	txnsToSend     map[string]map[string]writeTxn
+	neighborClocks map[string]int
 }
 
 type txnOp struct {
@@ -70,13 +72,14 @@ type writeElement struct {
 func main() {
 	n := maelstrom.NewNode()
 	s := server{
-		n:          n,
-		kv:         make(map[int][]listVal),
-		clock:      0,
-		mu:         sync.Mutex{},
-		signalSend: make(chan struct{}, 1),
-		sendMu:     sync.RWMutex{},
-		txnsToSend: make(map[string]map[string]writeTxn),
+		n:              n,
+		kv:             make(map[int][]listVal),
+		clock:          0,
+		mu:             sync.Mutex{},
+		signalSend:     make(chan struct{}, 1),
+		sendMu:         sync.RWMutex{},
+		txnsToSend:     make(map[string]map[string]writeTxn),
+		neighborClocks: make(map[string]int),
 	}
 
 	n.Handle("txn", func(msg maelstrom.Message) error {
@@ -172,16 +175,18 @@ func (s *server) handleGossip(msg maelstrom.Message) error {
 
 	// Populate queue and signal sending updates to other nodes
 	s.queueAndSignalSend(msg.Src, id, txn.clock, txn.writes)
-	return s.n.Reply(msg, map[string]any{"type": "gossip_ok", "id": id})
+	return s.n.Reply(msg, map[string]any{"type": "gossip_ok", "id": id, "clock": s.clock})
 }
 
 func (s *server) handleGossipOk(msg maelstrom.Message) error {
-	id, err := parseGossipOkMessage(msg)
+	id, clock, err := parseGossipOkMessage(msg)
 	if err != nil {
 		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	s.neighborClocks[msg.Src] = max(s.neighborClocks[msg.Src], clock)
 
 	// Clear sent messages
 	s.clearSentMessages(msg.Src, id)
