@@ -15,6 +15,8 @@ import (
 //   ./../maelstrom/maelstrom test -w txn-list-append --bin ~/go/bin/maelstrom-txn-list-6b --node-count 2 --concurrency 2n --time-limit 20 --rate 1000 --consistency-models read-uncommitted
 // Run with partition:
 //   ./../maelstrom/maelstrom test -w txn-list-append --bin ~/go/bin/maelstrom-txn-list-6b --node-count 2 --concurrency 2n --time-limit 20 --rate 1000 --consistency-models read-uncommitted --availability total --nemesis partition
+// Run with partition on more nodes: (TODO: get 5 nodes passing)
+//	 ./../maelstrom/maelstrom test -w txn-list-append --bin ~/go/bin/maelstrom-txn-list-6b --node-count 3 --concurrency 2n --time-limit 20 --rate 1000 --consistency-models read-uncommitted --availability total --nemesis partition
 
 const readOp = "r"
 const writeOp = "append"
@@ -119,13 +121,9 @@ func (s *server) handleTxn(msg maelstrom.Message) error {
 		return err
 	}
 
-	// Update the node's kv store
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	// Increment clock
 	s.clock++
-
 	// Execute transaction
 	var results [][]any
 	var writes []writeElement
@@ -145,11 +143,12 @@ func (s *server) handleTxn(msg maelstrom.Message) error {
 			writes = append(writes, we)
 		}
 	}
+	s.mu.Unlock()
 
 	// Populate queue and signal sending updates to other nodes
 	if len(writes) > 0 {
 		id := fmt.Sprintf("%s-%d", s.n.ID(), s.clock)
-		s.queueAndSignalSend(msg.Src, id, s.clock, writes)
+		s.queueAndSignalSend(id, s.clock, writes)
 	}
 
 	return s.n.Reply(msg, map[string]any{"type": "txn_ok", "txn": results})
@@ -163,18 +162,14 @@ func (s *server) handleGossip(msg maelstrom.Message) error {
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	// Increment the clock
 	s.clock = max(s.clock, txn.clock) + 1
-
 	// Update the node's kv store
 	for _, we := range txn.writes {
 		s.handleMerge(we)
 	}
+	s.mu.Unlock()
 
-	// Populate queue and signal sending updates to other nodes
-	s.queueAndSignalSend(msg.Src, id, txn.clock, txn.writes)
 	return s.n.Reply(msg, map[string]any{"type": "gossip_ok", "id": id, "clock": s.clock})
 }
 
@@ -186,6 +181,7 @@ func (s *server) handleGossipOk(msg maelstrom.Message) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Update neighbor timestamp
 	s.neighborClocks[msg.Src] = max(s.neighborClocks[msg.Src], clock)
 
 	// Clear sent messages
