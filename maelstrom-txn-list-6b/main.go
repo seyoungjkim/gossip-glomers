@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -11,12 +10,16 @@ import (
 
 // Run single node:
 //   ./../maelstrom/maelstrom test -w txn-list-append --bin ~/go/bin/maelstrom-txn-list-6b --node-count 1 --time-limit 20 --rate 1000 --concurrency 2n --consistency-models read-uncommitted --availability total
-// Run without partition:
-//   ./../maelstrom/maelstrom test -w txn-list-append --bin ~/go/bin/maelstrom-txn-list-6b --node-count 2 --concurrency 2n --time-limit 20 --rate 1000 --consistency-models read-uncommitted
-// Run with partition:
+// Run without partition (read-uncommitted):
+//   ./../maelstrom/maelstrom test -w txn-list-append --bin ~/go/bin/maelstrom-txn-list-6b --node-count 2 --concurrency 2n --time-limit 20 --rate 1000 --consistency-models read-uncommitted --availability total
+// Run with partition (read-uncommitted):
 //   ./../maelstrom/maelstrom test -w txn-list-append --bin ~/go/bin/maelstrom-txn-list-6b --node-count 2 --concurrency 2n --time-limit 20 --rate 1000 --consistency-models read-uncommitted --availability total --nemesis partition
-// Run with partition on more nodes: (TODO: get 5 nodes passing)
-//	 ./../maelstrom/maelstrom test -w txn-list-append --bin ~/go/bin/maelstrom-txn-list-6b --node-count 3 --concurrency 2n --time-limit 20 --rate 1000 --consistency-models read-uncommitted --availability total --nemesis partition
+// Run with partition on 5 nodes (read-uncommitted):
+//	 ./../maelstrom/maelstrom test -w txn-list-append --bin ~/go/bin/maelstrom-txn-list-6b --node-count 5 --concurrency 2n --time-limit 20 --rate 100 --consistency-models read-uncommitted --availability total --nemesis partition
+// Run without partition (read-committed):
+//   ./../maelstrom/maelstrom test -w txn-list-append --bin ~/go/bin/maelstrom-txn-list-6b --node-count 2 --concurrency 2n --time-limit 20 --rate 1000 --consistency-models read-committed --availability total
+// Run with partition (read-uncommitted);
+//   ./../maelstrom/maelstrom test -w txn-list-append --bin ~/go/bin/maelstrom-txn-list-6b --node-count 2 --concurrency 2n --time-limit 20 --rate 1000 --consistency-models read-committed --availability total --nemesis partition
 
 const readOp = "r"
 const writeOp = "append"
@@ -27,25 +30,25 @@ type txnMessage struct {
 }
 
 type gossipMessage struct {
-	Id     string  `json:"id"`
+	Id     int     `json:"id"`
 	Clock  int     `json:"clock"`
 	Writes [][]any `json:"writes"`
 }
 
 type gossipOkMessage struct {
-	Id    string `json:"id"`
-	Clock int    `json:"clock"`
+	Id int `json:"id"`
 }
 
 type server struct {
 	clock          int
+	id             int
 	n              *maelstrom.Node
 	mu             sync.Mutex
 	kv             map[int][]listVal
 	signalSend     chan struct{}
 	sendMu         sync.RWMutex
-	txnsToSend     map[string]map[string]writeTxn
-	neighborClocks map[string]int
+	txnsToSend     map[string]map[int]writeTxn
+	neighborStates map[string]neighborState
 }
 
 type txnOp struct {
@@ -71,17 +74,22 @@ type writeElement struct {
 	lv  listVal
 }
 
+type neighborState struct {
+	lastValidClock int
+	nextId         int
+	unmergedIds    map[int]int
+}
+
 func main() {
 	n := maelstrom.NewNode()
-	s := server{
+	s := &server{
 		n:              n,
-		kv:             make(map[int][]listVal),
 		clock:          0,
-		mu:             sync.Mutex{},
+		id:             0,
+		kv:             make(map[int][]listVal),
 		signalSend:     make(chan struct{}, 1),
-		sendMu:         sync.RWMutex{},
-		txnsToSend:     make(map[string]map[string]writeTxn),
-		neighborClocks: make(map[string]int),
+		txnsToSend:     make(map[string]map[int]writeTxn),
+		neighborStates: make(map[string]neighborState),
 	}
 
 	n.Handle("txn", func(msg maelstrom.Message) error {
@@ -143,12 +151,16 @@ func (s *server) handleTxn(msg maelstrom.Message) error {
 			writes = append(writes, we)
 		}
 	}
+	id := s.id
+	clock := s.clock
+	if len(writes) > 0 {
+		s.id++
+	}
 	s.mu.Unlock()
 
 	// Populate queue and signal sending updates to other nodes
 	if len(writes) > 0 {
-		id := fmt.Sprintf("%s-%d", s.n.ID(), s.clock)
-		s.queueAndSignalSend(id, s.clock, writes)
+		s.queueAndSignalSend(id, clock, writes)
 	}
 
 	return s.n.Reply(msg, map[string]any{"type": "txn_ok", "txn": results})
@@ -168,23 +180,49 @@ func (s *server) handleGossip(msg maelstrom.Message) error {
 	for _, we := range txn.writes {
 		s.handleMerge(we)
 	}
+	s.updateNeighborStates(msg.Src, id, txn.clock)
 	s.mu.Unlock()
 
-	return s.n.Reply(msg, map[string]any{"type": "gossip_ok", "id": id, "clock": s.clock})
+	return s.n.Reply(msg, map[string]any{"type": "gossip_ok", "id": id})
 }
 
 func (s *server) handleGossipOk(msg maelstrom.Message) error {
-	id, clock, err := parseGossipOkMessage(msg)
+	id, err := parseGossipOkMessage(msg)
 	if err != nil {
 		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Update neighbor timestamp
-	s.neighborClocks[msg.Src] = max(s.neighborClocks[msg.Src], clock)
-
 	// Clear sent messages
 	s.clearSentMessages(msg.Src, id)
 	return nil
+}
+
+func (s *server) updateNeighborStates(neighbor string, id int, clock int) {
+	state, ok := s.neighborStates[neighbor]
+	if !ok {
+		state = neighborState{
+			lastValidClock: 0,
+			nextId:         0,
+			unmergedIds:    make(map[int]int),
+		}
+	}
+	if id == state.nextId { // success, we can update the last valid id
+		state.lastValidClock = clock
+		state.nextId++
+		for {
+			nextId := state.nextId
+			if unmergedClock, ok := state.unmergedIds[nextId]; ok {
+				state.lastValidClock = unmergedClock
+				state.nextId++
+				delete(state.unmergedIds, nextId)
+			} else {
+				break
+			}
+		}
+	} else if id > state.nextId { // store the seen id and clock for later
+		state.unmergedIds[id] = clock
+	}
+	s.neighborStates[neighbor] = state
 }

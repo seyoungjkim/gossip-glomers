@@ -44,22 +44,18 @@ type sendInternalMessage struct {
 type server struct {
 	n             *maelstrom.Node
 	kv            *maelstrom.KV
-	logMutexes    *sync.Map
-	clientMutexes *sync.Map
-	logMessages   *sync.Map
-	clientOffsets *sync.Map
+	logMutexes    sync.Map
+	clientMutexes sync.Map
+	logMessages   sync.Map
+	clientOffsets sync.Map
 }
 
 func main() {
 	n := maelstrom.NewNode()
 	kv := maelstrom.NewLinKV(n)
-	s := server{
-		n,
-		kv,
-		&sync.Map{},
-		&sync.Map{},
-		&sync.Map{},
-		&sync.Map{},
+	s := &server{
+		n:  n,
+		kv: kv,
 	}
 
 	n.Handle("send", func(msg maelstrom.Message) error {

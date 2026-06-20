@@ -2,11 +2,11 @@ package main
 
 type sendRequest struct {
 	neighbor string
-	id       string
+	id       int
 	txn      writeTxn
 }
 
-func (s *server) queueAndSignalSend(id string, clock int, writeElems []writeElement) {
+func (s *server) queueAndSignalSend(id int, clock int, writeElems []writeElement) {
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
 
@@ -15,7 +15,7 @@ func (s *server) queueAndSignalSend(id string, clock int, writeElems []writeElem
 			continue
 		}
 		if _, ok := s.txnsToSend[neighbor]; !ok {
-			s.txnsToSend[neighbor] = make(map[string]writeTxn)
+			s.txnsToSend[neighbor] = make(map[int]writeTxn)
 		}
 		s.txnsToSend[neighbor][id] = writeTxn{
 			clock:  clock,
@@ -29,7 +29,7 @@ func (s *server) queueAndSignalSend(id string, clock int, writeElems []writeElem
 	}
 }
 
-func (s *server) clearSentMessages(neighbor string, id string) {
+func (s *server) clearSentMessages(neighbor string, id int) {
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
 

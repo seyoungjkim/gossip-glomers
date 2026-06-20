@@ -10,8 +10,8 @@ This repo implements the [fly.io distributed systems challenges](https://fly.io/
 
 It also contains the following additional workloads:
 * G-set
-* Txn-list-append (in-progress)
-  * Totally-available, read-uncommitted and read-committed
+* Txn-list-append
+  * Totally-available, read-uncommitted and read-committed transactions
 * Lin-kv (TODO)
 
 ## go project setup

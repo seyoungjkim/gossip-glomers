@@ -1,11 +1,11 @@
 package main
 
 import (
-	"maps"
+	"math"
 	"slices"
 )
 
-// TODO: improve efficiency of writes
+// TODO[optional]: improve efficiency of writes
 // O(n)
 func (s *server) handleRead(key int) []any {
 	list, ok := s.kv[key]
@@ -13,10 +13,7 @@ func (s *server) handleRead(key int) []any {
 		return []any{readOp, key, nil}
 	}
 	// maelstrom will get detect a G0 cycle if we return writes that might be re-ordered later.
-	maxClock := 0
-	if len(s.neighborClocks) > 0 {
-		maxClock = slices.Min(slices.Collect(maps.Values(s.neighborClocks)))
-	}
+	maxClock := s.getMaxClock()
 	return []any{readOp, key, formatList(maxClock, list)}
 }
 
@@ -47,4 +44,19 @@ func compareListVals(a, b listVal) int {
 		return a.nodeId - b.nodeId
 	}
 	return a.clock - b.clock
+}
+
+func (s *server) getMaxClock() int {
+	maxClock := math.MaxInt
+	for _, neighbor := range s.n.NodeIDs() {
+		if s.n.ID() == neighbor {
+			continue
+		}
+		c := 0
+		if state, ok := s.neighborStates[neighbor]; ok {
+			c = state.lastValidClock
+		}
+		maxClock = min(c, maxClock)
+	}
+	return maxClock
 }

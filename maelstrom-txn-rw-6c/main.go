@@ -101,7 +101,6 @@ func (s *server) handleTxn(msg maelstrom.Message, isInternal bool) error {
 		return nil
 	}
 
-	// TODO: retry failures
 	err = s.sendWrites(writes)
 	if err != nil {
 		return err

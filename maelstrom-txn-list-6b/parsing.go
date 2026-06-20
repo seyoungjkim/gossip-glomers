@@ -25,11 +25,11 @@ func parseTxnMessage(msg maelstrom.Message) ([]txnOp, error) {
 	return ops, nil
 }
 
-func parseGossipMessage(msg maelstrom.Message) (string, writeTxn, error) {
+func parseGossipMessage(msg maelstrom.Message) (int, writeTxn, error) {
 	var body gossipMessage
 	err := json.Unmarshal(msg.Body, &body)
 	if err != nil {
-		return "", writeTxn{}, err
+		return 0, writeTxn{}, err
 	}
 	var elems []writeElement
 	for _, e := range body.Writes {
@@ -45,16 +45,16 @@ func parseGossipMessage(msg maelstrom.Message) (string, writeTxn, error) {
 	return body.Id, writeTxn{clock: body.Clock, writes: elems}, nil
 }
 
-func parseGossipOkMessage(msg maelstrom.Message) (string, int, error) {
+func parseGossipOkMessage(msg maelstrom.Message) (int, error) {
 	var body gossipOkMessage
 	err := json.Unmarshal(msg.Body, &body)
 	if err != nil {
-		return "", 0, err
+		return 0, err
 	}
-	return body.Id, body.Clock, nil
+	return body.Id, nil
 }
 
-func formatGossipMessageBody(id string, txn writeTxn) map[string]any {
+func formatGossipMessageBody(id int, txn writeTxn) map[string]any {
 	var formattedTxn [][]any
 	for _, op := range txn.writes {
 		formattedTxn = append(formattedTxn, []any{op.key, op.lv.clock, op.lv.nodeId, op.lv.index, op.lv.val})
